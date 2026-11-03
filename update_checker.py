@@ -2,8 +2,14 @@ import requests
 from bs4 import BeautifulSoup
 import json
 import re
+import os
+import hashlib
+import firebase_admin
+
+from firebase_admin import credentials, firestore
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
+
 
 SOURCES = {
     "Bihar Board": [
@@ -17,6 +23,7 @@ SOURCES = {
     ]
 }
 
+
 KEYWORDS = [
     "notice", "circular", "result", "admit",
     "exam", "syllabus", "date sheet", "model paper",
@@ -24,9 +31,11 @@ KEYWORDS = [
     "परीक्षा", "सूचना", "पाठ्यक्रम", "मॉडल"
 ]
 
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; BiharEduAlert/1.0)"
 }
+
 
 def get_title(link):
     title = link.get_text(" ", strip=True)
@@ -109,6 +118,7 @@ def get_updates():
                 print(f"Error: {page_url} | {error}")
 
     unique = {}
+
     for item in updates:
         unique[item["url"]] = item
 
@@ -124,6 +134,58 @@ def get_updates():
 
     print("Total updates:", len(unique))
 
+    return list(unique.values())
+
+
+def upload_to_firebase(updates):
+    secret_value = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+
+    if not secret_value:
+        raise RuntimeError(
+            "FIREBASE_SERVICE_ACCOUNT GitHub Secret nahi mila."
+        )
+
+    service_account_info = json.loads(secret_value)
+
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(service_account_info)
+        firebase_admin.initialize_app(cred)
+
+    db = firestore.client()
+
+    collection = db.collection("board_updates")
+
+    batch = db.batch()
+    count = 0
+
+    for item in updates:
+        document_id = hashlib.sha256(
+            item["url"].encode("utf-8")
+        ).hexdigest()
+
+        document = collection.document(document_id)
+
+        batch.set(document, {
+            "board": item["board"],
+            "title": item["title"],
+            "url": item["url"],
+            "source": item["source"],
+            "checked_at": item["checked_at"],
+            "updated_at": firestore.SERVER_TIMESTAMP
+        }, merge=True)
+
+        count += 1
+
+        if count % 400 == 0:
+            batch.commit()
+            batch = db.batch()
+
+    if count % 400 != 0:
+        batch.commit()
+
+    print("Firebase upload successful:", count)
+
 
 if __name__ == "__main__":
-    get_updates()
+    updates = get_updates()
+    upload_to_firebase(updates)
