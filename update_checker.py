@@ -5,14 +5,15 @@ import hashlib
 import logging
 import time
 import html
+import unicodedata
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urljoin, urlparse, urldefrag, quote
+from urllib.parse import urljoin, urlparse, urldefrag, unquote
 from email.utils import parsedate_to_datetime
+from io import BytesIO
 
 import requests
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
-from io import BytesIO
 
 try:
     import firebase_admin
@@ -30,12 +31,16 @@ except ImportError:
 APP_NAME = "Bihar EduAlert"
 OUTPUT_FILE = "updates.json"
 
-REQUEST_TIMEOUT = 25
+HTML_TIMEOUT = 18
+PDF_TIMEOUT = 12
+RSS_TIMEOUT = 15
 MAX_AGE_DAYS = 90
-MAX_LINKS_PER_SOURCE = 150
-MAX_PDF_SIZE = 8 * 1024 * 1024
-MAX_PDF_PAGES = 8
-MAX_RSS_ENTRIES = 100
+MAX_LINKS_PER_PAGE = 250
+MAX_PDF_SIZE = 5 * 1024 * 1024
+MAX_PDF_PAGES = 5
+MAX_RSS_ENTRIES = 60
+MAX_PDF_DOWNLOADS_PER_PAGE = 18
+SLEEP_BETWEEN_PAGES = 0.3
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -61,7 +66,7 @@ session.headers.update(HEADERS)
 
 
 # =========================================================
-# OFFICIAL BOARD SOURCES
+# SOURCES
 # =========================================================
 
 BOARD_SOURCES = [
@@ -84,11 +89,6 @@ BOARD_SOURCES = [
     },
 ]
 
-
-# =========================================================
-# OFFICIAL JOB SOURCES
-# =========================================================
-
 JOB_SOURCES = [
     {
         "name": "Bihar Police CSBC",
@@ -103,6 +103,7 @@ JOB_SOURCES = [
     {
         "name": "BPSC",
         "category": "BPSC",
+        # BPSC and BPSSC are different commissions/websites.
         "urls": ["https://bpsc.bihar.gov.in/"],
     },
     {
@@ -118,10 +119,8 @@ JOB_SOURCES = [
     {
         "name": "Railway Recruitment Board",
         "category": "Railway",
-        "urls": [
-            "https://rrb.indianrailways.gov.in/",
-            "https://www.rrbapply.gov.in/",
-        ],
+        # rrbapply.gov.in is an application portal, not a notices page.
+        "urls": ["https://rrb.indianrailways.gov.in/"],
     },
     {
         "name": "SSC",
@@ -150,11 +149,6 @@ JOB_SOURCES = [
     },
 ]
 
-
-# =========================================================
-# RSS NEWS SOURCES
-# =========================================================
-
 RSS_SOURCES = [
     {
         "name": "Amar Ujala Bihar",
@@ -179,9 +173,9 @@ RSS_SOURCES = [
 # =========================================================
 
 JOB_WORDS = [
-    "recruitment", "vacancy", "online application", "apply online",
-    "appointment", "भर्ती", "नियुक्ति", "रिक्ति", "आवेदन",
-    "रोजगार", "नौकरी", "पदों पर",
+    "recruitment", "vacancy", "vacancies", "online application",
+    "apply online", "application form", "appointment", "भर्ती",
+    "नियुक्ति", "रिक्ति", "आवेदन", "रोजगार", "नौकरी", "पदों पर",
 ]
 
 ADMIT_WORDS = [
@@ -196,43 +190,77 @@ RESULT_WORDS = [
 
 EXAM_WORDS = [
     "exam date", "examination", "exam schedule", "time table",
-    "answer key", "exam calendar", "परीक्षा", "उत्तर कुंजी",
-    "परीक्षा तिथि", "समय सारणी",
+    "date sheet", "answer key", "exam calendar", "परीक्षा",
+    "उत्तर कुंजी", "परीक्षा तिथि", "समय सारणी", "डेट शीट",
 ]
 
 BOARD_WORDS = [
-    "bihar board", "bseb", "intermediate", "matric",
-    "cbse", "class 10", "class 12", "class x", "class xii",
-    "syllabus", "sample paper", "model paper", "पाठ्यक्रम",
-    "मैट्रिक", "इंटर", "मॉडल पेपर",
+    "bihar board", "bseb", "intermediate", "matric", "cbse",
+    "class 10", "class 12", "class x", "class xii", "syllabus",
+    "sample paper", "model paper", "पाठ्यक्रम", "मैट्रिक",
+    "इंटर", "मॉडल पेपर",
 ]
 
-LAST_DATE_PATTERNS = [
-    r"(?:last date|closing date|date of closure|अंतिम तिथि)"
-    r"\s*[:\-]?\s*([0-3]?\d[./\-][01]?\d[./\-](?:20)?\d{2})",
-    r"(?:last date|closing date|अंतिम तिथि)"
-    r"\s*[:\-]?\s*((?:\d{1,2}\s+)?"
+NOTICE_WORDS = [
+    "notice", "notification", "circular", "advertisement",
+    "corrigendum", "tender", "सूचना", "अधिसूचना", "विज्ञप्ति",
+]
+
+IGNORE_TITLE_WORDS = [
+    "home", "homepage", "contact us", "about us", "login",
+    "logout", "privacy policy", "disclaimer", "tender",
+    "facebook", "twitter", "instagram", "youtube",
+]
+
+DATE_TOKEN = (
+    r"(?:\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|"
+    r"\d{1,2}\s+(?:January|February|March|April|May|June|July|"
+    r"August|September|October|November|December)\s+\d{4}|"
     r"(?:January|February|March|April|May|June|July|August|"
-    r"September|October|November|December)\s+\d{4})",
-]
+    r"September|October|November|December)\s+\d{1,2},?\s+\d{4})"
+)
+
+LAST_DATE_LABELS = (
+    r"(?:last date|closing date|date of closure|last date for "
+    r"submission|closing of application|अंतिम तिथि|अंतिम तारीख|"
+    r"आवेदन की अंतिम तिथि)"
+)
 
 
 # =========================================================
-# DATE HELPERS
+# TEXT AND DATE HELPERS
 # =========================================================
+
+def clean_text(value):
+    if value is None:
+        return ""
+    value = html.unescape(str(value))
+    value = BeautifulSoup(value, "html.parser").get_text(" ", strip=True)
+    value = re.sub(r"\s+", " ", value).strip()
+
+    # Fix common UTF-8 text accidentally decoded as Windows-1252.
+    if any(token in value for token in ("â€“", "â€”", "â€™", "Ã", "Â")):
+        try:
+            repaired = value.encode("cp1252").decode("utf-8")
+            if repaired:
+                value = repaired
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    return value
+
 
 def parse_date(value):
     if not value:
         return None
 
-    value = html.unescape(str(value)).strip()
+    value = clean_text(value)
 
     try:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if dt.tzinfo:
             dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         return dt
-    except Exception:
+    except (ValueError, TypeError):
         pass
 
     try:
@@ -240,26 +268,19 @@ def parse_date(value):
         if dt.tzinfo:
             dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         return dt
-    except Exception:
+    except (ValueError, TypeError, OverflowError):
         pass
 
     formats = [
-        "%d-%m-%Y",
-        "%d/%m/%Y",
-        "%d.%m.%Y",
-        "%Y-%m-%d",
-        "%d %B %Y",
-        "%d %b %Y",
-        "%B %d, %Y",
-        "%b %d, %Y",
+        "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y",
+        "%Y-%m-%d", "%d %B %Y", "%d %b %Y",
+        "%B %d, %Y", "%b %d, %Y",
     ]
-
     for fmt in formats:
         try:
             return datetime.strptime(value, fmt)
-        except Exception:
+        except ValueError:
             continue
-
     return None
 
 
@@ -267,21 +288,9 @@ def extract_date_from_text(text):
     if not text:
         return None
 
-    patterns = [
-        r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b",
-        r"\b\d{1,2}\s+(?:January|February|March|April|May|June|July|"
-        r"August|September|October|November|December)\s+\d{4}\b",
-        r"\b(?:January|February|March|April|May|June|July|August|"
-        r"September|October|November|December)\s+\d{1,2},?\s+\d{4}\b",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            result = parse_date(match.group(0))
-            if result:
-                return result
-
+    match = re.search(DATE_TOKEN, text, re.IGNORECASE)
+    if match:
+        return parse_date(match.group(0))
     return None
 
 
@@ -289,22 +298,25 @@ def extract_last_date(text):
     if not text:
         return None
 
-    for pattern in LAST_DATE_PATTERNS:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            result = parse_date(match.group(1))
-            if result:
-                return result
-
+    pattern = LAST_DATE_LABELS + r"\s*(?:is|:|-|को)?\s*(" + DATE_TOKEN + r")"
+    match = re.search(pattern, text, re.IGNORECASE)
+    if match:
+        return parse_date(match.group(1))
     return None
 
 
 def is_recent(published_at):
     if not published_at:
-        # Date missing: retain the update rather than silently discard it.
+        # Keep undated official notices, but label the date as unavailable.
         return True
 
-    return published_at >= datetime.utcnow() - timedelta(days=MAX_AGE_DAYS)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return published_at >= now - timedelta(days=MAX_AGE_DAYS)
+
+
+def contains_any(text, words):
+    text = (text or "").casefold()
+    return any(word.casefold() in text for word in words)
 
 
 # =========================================================
@@ -314,21 +326,16 @@ def is_recent(published_at):
 def clean_url(url, base_url):
     if not url:
         return None
-
     url = html.unescape(str(url)).strip()
-    url = url.replace(" ", "%20")
+    if url.startswith(("javascript:", "mailto:", "tel:", "#")):
+        return None
 
     try:
         url = urljoin(base_url, url)
         url, _ = urldefrag(url)
         parsed = urlparse(url)
-
-        if parsed.scheme not in ("http", "https"):
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
             return None
-
-        if not parsed.netloc:
-            return None
-
         return url
     except Exception:
         return None
@@ -339,37 +346,75 @@ def make_id(url, title):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def normalize_title(title):
+    title = unicodedata.normalize("NFKC", clean_text(title)).casefold()
+    title = re.sub(r"[^\w\s]", " ", title)
+    return re.sub(r"\s+", " ", title).strip()
+
+
+def is_social_or_irrelevant_url(url):
+    host = urlparse(url).netloc.casefold()
+    ignored_hosts = (
+        "facebook.com", "twitter.com", "x.com", "instagram.com",
+        "youtube.com", "whatsapp.com", "linkedin.com",
+    )
+    return any(host == item or host.endswith("." + item) for item in ignored_hosts)
+
+
+def is_document_url(url):
+    path = urlparse(url).path.casefold()
+    return path.endswith((".pdf", ".doc", ".docx", ".xls", ".xlsx"))
+
+
+def looks_useful(title, url):
+    text = f"{title} {url}".casefold()
+    if contains_any(title, IGNORE_TITLE_WORDS):
+        return False
+
+    keywords = JOB_WORDS + ADMIT_WORDS + RESULT_WORDS + EXAM_WORDS
+    keywords += BOARD_WORDS + NOTICE_WORDS
+    return is_document_url(url) or contains_any(text, keywords)
+
+
+def title_from_filename(url):
+    name = unquote(urlparse(url).path.rsplit("/", 1)[-1])
+    name = re.sub(r"\.(pdf|docx?|xlsx?)$", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"[_-]+", " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name[:200]
+
+
+def useful_title(title):
+    title = clean_text(title)
+    if len(title) < 4:
+        return False
+    generic = {
+        "english", "hindi", "download", "click here", "view",
+        "read more", "more", "pdf",
+    }
+    return title.casefold() not in generic
+
+
 # =========================================================
 # CLASSIFICATION
 # =========================================================
 
-def contains_any(text, words):
-    text = (text or "").lower()
-    return any(word.lower() in text for word in words)
-
-
 def classify_update(title, summary, source_category):
-    text = f"{title} {summary}".lower()
+    text = f"{title} {summary}".casefold()
 
     if contains_any(text, ADMIT_WORDS):
         return "Admit Card"
-
     if contains_any(text, RESULT_WORDS):
         return "Result"
-
     if contains_any(text, EXAM_WORDS):
         return "Exam Update"
-
     if contains_any(text, JOB_WORDS):
         return source_category
-
     if contains_any(text, BOARD_WORDS):
         if "cbse" in text:
             return "CBSE Board"
-        if "bihar" in text or "bseb" in text or "matric" in text:
+        if any(word in text for word in ("bihar", "bseb", "matric", "intermediate")):
             return "Bihar Board"
-        return source_category
-
     return source_category
 
 
@@ -377,91 +422,117 @@ def classify_update(title, summary, source_category):
 # HTTP FETCH
 # =========================================================
 
-def fetch_url(url):
+def fetch_url(url, timeout=HTML_TIMEOUT, stream=False):
     try:
         response = session.get(
             url,
-            timeout=REQUEST_TIMEOUT,
+            timeout=timeout,
             allow_redirects=True,
+            stream=stream,
         )
         response.raise_for_status()
         return response
     except requests.exceptions.SSLError as exc:
         logging.error("SSL error: %s | %s", url, exc)
     except requests.exceptions.Timeout:
-        logging.error("Timeout: %s", url)
+        logging.warning("Timeout: %s", url)
     except requests.exceptions.RequestException as exc:
-        logging.error("Request failed: %s | %s", url, exc)
+        logging.warning("Request failed: %s | %s", url, exc)
     except Exception as exc:
-        logging.error("Unexpected fetch error: %s | %s", url, exc)
-
+        logging.warning("Unexpected fetch error: %s | %s", url, exc)
     return None
 
 
 # =========================================================
-# PDF TEXT EXTRACTION
+# PDF EXTRACTION
 # =========================================================
 
 def extract_pdf_text(url):
-    response = fetch_url(url)
+    response = fetch_url(url, timeout=PDF_TIMEOUT, stream=True)
     if not response:
         return ""
 
-    content_type = response.headers.get("Content-Type", "").lower()
-    data = response.content
-
-    if len(data) > MAX_PDF_SIZE:
-        logging.warning("PDF too large; skipped: %s", url)
-        return ""
-
-    if "pdf" not in content_type and not data.startswith(b"%PDF"):
-        return ""
-
     try:
-        reader = PdfReader(BytesIO(data))
+        content_type = response.headers.get("Content-Type", "").casefold()
+        content_length = response.headers.get("Content-Length", "")
+        if content_length.isdigit() and int(content_length) > MAX_PDF_SIZE:
+            logging.info("PDF skipped (Content-Length too large): %s", url)
+            return ""
+
+        buffer = BytesIO()
+        total = 0
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > MAX_PDF_SIZE:
+                logging.info("PDF skipped (over size limit): %s", url)
+                return ""
+            buffer.write(chunk)
+
+        data = buffer.getvalue()
+        if "pdf" not in content_type and not data.startswith(b"%PDF"):
+            return ""
+
+        reader = PdfReader(BytesIO(data), strict=False)
         parts = []
-
         for page in reader.pages[:MAX_PDF_PAGES]:
-            parts.append(page.extract_text() or "")
+            try:
+                parts.append(page.extract_text() or "")
+            except Exception:
+                continue
 
-        return " ".join(parts).strip()
+        return clean_text(" ".join(parts))[:5000]
     except Exception as exc:
-        logging.warning("PDF reading failed: %s | %s", url, exc)
+        logging.warning("PDF extraction failed: %s | %s", url, exc)
         return ""
+    finally:
+        response.close()
 
 
 # =========================================================
-# HTML PAGE SCRAPER
+# HTML METADATA
 # =========================================================
 
 def extract_page_metadata(soup):
-    published = None
-
     selectors = [
         ("meta", {"property": "article:published_time"}),
         ("meta", {"name": "date"}),
         ("meta", {"name": "publish-date"}),
         ("meta", {"name": "pubdate"}),
         ("meta", {"itemprop": "datePublished"}),
+        ("meta", {"property": "og:updated_time"}),
     ]
 
     for tag_name, attrs in selectors:
         tag = soup.find(tag_name, attrs=attrs)
         if tag:
             value = tag.get("content") or tag.get("datetime")
-            published = parse_date(value)
-            if published:
-                break
+            result = parse_date(value)
+            if result:
+                return result
 
-    if not published:
-        tag = soup.find("time")
-        if tag:
-            published = parse_date(
-                tag.get("datetime") or tag.get_text(" ", strip=True)
-            )
+    tag = soup.find("time")
+    if tag:
+        return parse_date(tag.get("datetime") or tag.get_text(" ", strip=True))
+    return None
 
-    return published
 
+def extract_pdf_title(pdf_text, fallback):
+    if not pdf_text:
+        return fallback
+
+    for line in pdf_text.splitlines():
+        line = clean_text(line)
+        if 8 <= len(line) <= 180 and not re.fullmatch(r"\d+", line):
+            if line.casefold() not in {"english", "hindi", "government of india"}:
+                return line
+    return fallback
+
+
+# =========================================================
+# HTML SCRAPER
+# =========================================================
 
 def scrape_html_source(source):
     source_name = source["name"]
@@ -470,119 +541,100 @@ def scrape_html_source(source):
 
     for page_url in source["urls"]:
         logging.info("Checking %s: %s", source_name, page_url)
-
-        response = fetch_url(page_url)
+        response = fetch_url(page_url, timeout=HTML_TIMEOUT)
         if not response:
             continue
 
-        content_type = response.headers.get("Content-Type", "").lower()
-        if "html" not in content_type and "text" not in content_type:
-            logging.warning("Not an HTML page: %s", page_url)
-            continue
-
-        soup = BeautifulSoup(response.text, "lxml")
-        page_date = extract_page_metadata(soup)
-
-        links = soup.find_all("a", href=True)
-        logging.info("%s links found on %s", len(links), page_url)
-
-        accepted = 0
-
-        for link in links[:MAX_LINKS_PER_SOURCE]:
-            title = link.get_text(" ", strip=True)
-            raw_url = link.get("href")
-
-            if not title or len(title) < 4:
+        try:
+            content_type = response.headers.get("Content-Type", "").casefold()
+            if "html" not in content_type and "text" not in content_type:
+                logging.warning("Not an HTML page: %s", page_url)
                 continue
 
-            full_url = clean_url(raw_url, response.url)
-            if not full_url:
-                continue
+            soup = BeautifulSoup(response.content, "lxml")
+            page_date = extract_page_metadata(soup)
+            links = soup.find_all("a", href=True)
+            logging.info("%s links found on %s", len(links), page_url)
 
-            parsed = urlparse(full_url)
-            if parsed.netloc == urlparse(page_url).netloc:
-                pass
+            accepted = 0
+            pdf_downloads = 0
+            page_seen_urls = set()
 
-            lower_url = full_url.lower()
-            lower_title = title.lower()
+            for link in links[:MAX_LINKS_PER_PAGE]:
+                raw_url = link.get("href")
+                full_url = clean_url(raw_url, response.url)
+                if not full_url or full_url in page_seen_urls:
+                    continue
+                page_seen_urls.add(full_url)
 
-            ignored = [
-                "javascript:",
-                "mailto:",
-                "tel:",
-                "facebook.com",
-                "twitter.com",
-                "instagram.com",
-                "youtube.com",
-                "whatsapp.com",
-            ]
+                if is_social_or_irrelevant_url(full_url):
+                    continue
 
-            if any(item in lower_url for item in ignored):
-                continue
+                title = clean_text(link.get_text(" ", strip=True))
+                if not title:
+                    title = title_from_filename(full_url)
 
-            # Keep links that look like notices, documents or useful updates.
-            useful_words = (
-                JOB_WORDS + ADMIT_WORDS + RESULT_WORDS + EXAM_WORDS
-                + BOARD_WORDS
+                if not useful_title(title) and not is_document_url(full_url):
+                    continue
+                if not looks_useful(title, full_url):
+                    continue
+
+                pdf_text = ""
+                if is_document_url(full_url):
+                    # Limit PDF downloads so one large notice page cannot take
+                    # several minutes on every scheduled run.
+                    if pdf_downloads >= MAX_PDF_DOWNLOADS_PER_PAGE:
+                        continue
+                    pdf_downloads += 1
+                    if urlparse(full_url).path.casefold().endswith(".pdf"):
+                        pdf_text = extract_pdf_text(full_url)
+
+                if title.casefold() in {"english", "hindi", "download", "pdf"}:
+                    title = extract_pdf_title(pdf_text, title_from_filename(full_url))
+
+                if not useful_title(title):
+                    title = title_from_filename(full_url)
+                if len(title) < 4:
+                    continue
+
+                summary = pdf_text[:1200]
+                combined_text = f"{title} {summary}"
+
+                published = (
+                    extract_date_from_text(title)
+                    or extract_date_from_text(pdf_text)
+                    or page_date
+                )
+                last_date = extract_last_date(combined_text)
+
+                if not is_recent(published):
+                    continue
+
+                final_category = classify_update(title, summary, category)
+
+                results.append({
+                    "id": make_id(full_url, title),
+                    "title": title[:300],
+                    "category": final_category,
+                    "source": source_name,
+                    "url": full_url,
+                    "published_at": published.isoformat() if published else "",
+                    "last_date": last_date.date().isoformat() if last_date else "",
+                    "summary": summary,
+                    "active": True,
+                })
+                accepted += 1
+
+            logging.info(
+                "%s accepted %s updates from %s (PDF checked: %s)",
+                source_name, accepted, page_url, pdf_downloads,
             )
+        except Exception as exc:
+            logging.exception("Page scraping failed: %s | %s", page_url, exc)
+        finally:
+            response.close()
 
-            file_link = lower_url.endswith(
-                (".pdf", ".doc", ".docx", ".xls", ".xlsx")
-            )
-
-            if not file_link and not contains_any(
-                lower_title, useful_words
-            ):
-                continue
-
-            pdf_text = ""
-            if lower_url.endswith(".pdf"):
-                pdf_text = extract_pdf_text(full_url)
-
-            combined_text = f"{title} {pdf_text}"
-            published = (
-                extract_date_from_text(title)
-                or extract_date_from_text(pdf_text)
-                or page_date
-            )
-
-            last_date = extract_last_date(combined_text)
-
-            if not is_recent(published):
-                continue
-
-            final_category = classify_update(
-                title,
-                pdf_text,
-                category,
-            )
-
-            results.append({
-                "id": make_id(full_url, title),
-                "title": title[:300],
-                "category": final_category,
-                "source": source_name,
-                "url": full_url,
-                "published_at": (
-                    published.isoformat() if published else ""
-                ),
-                "last_date": (
-                    last_date.date().isoformat() if last_date else ""
-                ),
-                "summary": pdf_text[:1200],
-                "active": True,
-            })
-
-            accepted += 1
-
-        logging.info(
-            "%s accepted %s updates from %s",
-            source_name,
-            accepted,
-            page_url,
-        )
-
-        time.sleep(0.5)
+        time.sleep(SLEEP_BETWEEN_PAGES)
 
     return results
 
@@ -592,78 +644,63 @@ def scrape_html_source(source):
 # =========================================================
 
 def scrape_rss_source(source):
+    feed_url = source["url"]
     source_name = source["name"]
     category = source["category"]
-    feed_url = source["url"]
 
     logging.info("Checking RSS: %s", feed_url)
-
-    response = fetch_url(feed_url)
+    response = fetch_url(feed_url, timeout=RSS_TIMEOUT)
     if not response:
         return []
 
-    soup = BeautifulSoup(response.content, "xml")
-    entries = soup.find_all(["item", "entry"])
     results = []
+    try:
+        soup = BeautifulSoup(response.content, "xml")
+        entries = soup.find_all(["item", "entry"])
 
-    for entry in entries[:MAX_RSS_ENTRIES]:
-        title_tag = entry.find("title")
-        title = title_tag.get_text(" ", strip=True) if title_tag else ""
+        for entry in entries[:MAX_RSS_ENTRIES]:
+            title_tag = entry.find("title")
+            title = clean_text(title_tag.get_text(" ", strip=True)) if title_tag else ""
 
-        link_tag = entry.find("link")
-        link = ""
+            link_tag = entry.find("link")
+            link = ""
+            if link_tag:
+                link = link_tag.get("href") or link_tag.get_text(strip=True)
+            link = clean_url(link, feed_url)
 
-        if link_tag:
-            link = link_tag.get("href") or link_tag.get_text(strip=True)
+            if not title or not link:
+                continue
 
-        link = clean_url(link, feed_url)
+            description_tag = entry.find(["description", "summary", "content"])
+            summary = (
+                clean_text(description_tag.get_text(" ", strip=True))
+                if description_tag else ""
+            )
 
-        if not title or not link:
-            continue
+            date_tag = entry.find(["pubDate", "published", "updated", "date"])
+            published = parse_date(date_tag.get_text(" ", strip=True)) if date_tag else None
 
-        description_tag = entry.find(
-            ["description", "summary", "content"]
-        )
-        summary = (
-            description_tag.get_text(" ", strip=True)
-            if description_tag else ""
-        )
+            if not is_recent(published):
+                continue
 
-        date_tag = entry.find(
-            ["pubDate", "published", "updated", "date"]
-        )
-        published = (
-            parse_date(date_tag.get_text(" ", strip=True))
-            if date_tag else None
-        )
+            final_category = classify_update(title, summary, category)
+            last_date = extract_last_date(summary)
 
-        if not is_recent(published):
-            continue
-
-        final_category = classify_update(
-            title,
-            summary,
-            category,
-        )
-
-        results.append({
-            "id": make_id(link, title),
-            "title": title[:300],
-            "category": final_category,
-            "source": source_name,
-            "url": link,
-            "published_at": (
-                published.isoformat() if published else ""
-            ),
-            "last_date": (
-                extract_last_date(summary).date().isoformat()
-                if extract_last_date(summary) else ""
-            ),
-            "summary": BeautifulSoup(
-                summary, "html.parser"
-            ).get_text(" ", strip=True)[:1200],
-            "active": True,
-        })
+            results.append({
+                "id": make_id(link, title),
+                "title": title[:300],
+                "category": final_category,
+                "source": source_name,
+                "url": link,
+                "published_at": published.isoformat() if published else "",
+                "last_date": last_date.date().isoformat() if last_date else "",
+                "summary": summary[:1200],
+                "active": True,
+            })
+    except Exception as exc:
+        logging.exception("RSS parsing failed: %s | %s", feed_url, exc)
+    finally:
+        response.close()
 
     logging.info("%s RSS updates: %s", source_name, len(results))
     return results
@@ -674,39 +711,44 @@ def scrape_rss_source(source):
 # =========================================================
 
 def deduplicate_updates(updates):
-    unique = {}
+    unique_by_url = {}
 
     for item in updates:
-        key = item.get("url") or item.get("id")
-
+        url = item.get("url", "").strip()
+        key = url.casefold() if url else item.get("id", "")
         if not key:
-            key = make_id(
-                "",
-                item.get("title", ""),
-            )
+            key = make_id("", item.get("title", ""))
 
-        if key not in unique:
-            unique[key] = item
+        if key not in unique_by_url:
+            unique_by_url[key] = item
             continue
 
-        old = unique[key]
-
-        # Prefer the record that has more useful information.
-        old_score = (
-            bool(old.get("published_at"))
-            + bool(old.get("last_date"))
-            + bool(old.get("summary"))
-        )
-        new_score = (
-            bool(item.get("published_at"))
-            + bool(item.get("last_date"))
-            + bool(item.get("summary"))
-        )
-
+        old = unique_by_url[key]
+        old_score = sum(bool(old.get(field)) for field in (
+            "published_at", "last_date", "summary"
+        ))
+        new_score = sum(bool(item.get(field)) for field in (
+            "published_at", "last_date", "summary"
+        ))
         if new_score > old_score:
-            unique[key] = item
+            unique_by_url[key] = item
 
-    return list(unique.values())
+    # A second pass removes exact duplicate titles from the same source.
+    # Different URLs are retained if their titles differ or source differs.
+    final = []
+    seen = set()
+    for item in unique_by_url.values():
+        key = (item.get("source", ""), normalize_title(item.get("title", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        final.append(item)
+
+    final.sort(
+        key=lambda item: item.get("published_at") or "",
+        reverse=True,
+    )
+    return final
 
 
 # =========================================================
@@ -718,85 +760,68 @@ def initialize_firebase():
         logging.error("firebase-admin library is not installed.")
         return None
 
-    service_account_json = os.environ.get(
-        "FIREBASE_SERVICE_ACCOUNT"
-    )
-
+    service_account_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
     if not service_account_json:
         logging.error("FIREBASE_SERVICE_ACCOUNT secret is missing.")
         return None
 
     try:
         service_account_info = json.loads(service_account_json)
-
         if not firebase_admin._apps:
             cred = credentials.Certificate(service_account_info)
             firebase_admin.initialize_app(cred)
-
         return firestore.client()
-
     except Exception as exc:
-        logging.error("Firebase initialization failed: %s", exc)
+        logging.exception("Firebase initialization failed: %s", exc)
         return None
 
 
 def get_collection(category):
-    category = (category or "").lower()
+    category = (category or "").casefold()
 
     if "news" in category:
         return "news_updates"
-
     if "board" in category:
         return "board_updates"
-
     if category in ("admit card", "result", "exam update"):
         return "exam_updates"
-
     return "job_updates"
 
 
 def upload_to_firestore(updates):
     db = initialize_firebase()
-
     if db is None:
         logging.error("Firebase upload skipped.")
         return False
 
     try:
-        batch = db.batch()
-        count = 0
         uploaded = 0
+        batch = db.batch()
+        batch_count = 0
 
         for item in updates:
             collection_name = get_collection(item.get("category"))
-            doc_ref = db.collection(collection_name).document(
-                item["id"]
-            )
+            doc_ref = db.collection(collection_name).document(item["id"])
 
             data = dict(item)
             data["updated_at"] = firestore.SERVER_TIMESTAMP
             data["active"] = True
-
             batch.set(doc_ref, data, merge=True)
-            count += 1
+            batch_count += 1
 
-            if count >= 400:
+            if batch_count >= 400:
                 batch.commit()
-                uploaded += count
-                logging.info("Firebase batch uploaded: %s", count)
+                uploaded += batch_count
+                logging.info("Firebase batch uploaded: %s", batch_count)
                 batch = db.batch()
-                count = 0
+                batch_count = 0
 
-        if count:
+        if batch_count:
             batch.commit()
-            uploaded += count
+            uploaded += batch_count
 
-        logging.info(
-            "Firebase upload successful: %s records",
-            uploaded,
-        )
+        logging.info("Firebase upload successful: %s records", uploaded)
         return True
-
     except Exception as exc:
         logging.exception("Firebase upload failed: %s", exc)
         return False
@@ -810,32 +835,15 @@ def save_json(updates):
     try:
         output = {
             "app": APP_NAME,
-            "generated_at": datetime.now(
-                timezone.utc
-            ).isoformat(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
             "total_updates": len(updates),
             "updates": updates,
         }
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as file:
+            json.dump(output, file, ensure_ascii=False, indent=2)
 
-        with open(
-            OUTPUT_FILE,
-            "w",
-            encoding="utf-8",
-        ) as file:
-            json.dump(
-                output,
-                file,
-                ensure_ascii=False,
-                indent=2,
-            )
-
-        logging.info(
-            "JSON saved: %s (%s updates)",
-            OUTPUT_FILE,
-            len(updates),
-        )
+        logging.info("JSON saved: %s (%s updates)", OUTPUT_FILE, len(updates))
         return True
-
     except Exception as exc:
         logging.exception("JSON save failed: %s", exc)
         return False
@@ -852,50 +860,30 @@ def main():
 
     all_updates = []
 
-    # Board websites
     for source in BOARD_SOURCES:
         try:
             all_updates.extend(scrape_html_source(source))
         except Exception as exc:
-            logging.exception(
-                "Board source error: %s | %s",
-                source["name"],
-                exc,
-            )
+            logging.exception("Board source error: %s | %s", source["name"], exc)
 
-    # Recruitment websites
     for source in JOB_SOURCES:
         try:
             all_updates.extend(scrape_html_source(source))
         except Exception as exc:
-            logging.exception(
-                "Job source error: %s | %s",
-                source["name"],
-                exc,
-            )
+            logging.exception("Job source error: %s | %s", source["name"], exc)
 
-    # News RSS
     for source in RSS_SOURCES:
         try:
             all_updates.extend(scrape_rss_source(source))
         except Exception as exc:
-            logging.exception(
-                "RSS source error: %s | %s",
-                source["name"],
-                exc,
-            )
+            logging.exception("RSS source error: %s | %s", source["name"], exc)
 
     all_updates = deduplicate_updates(all_updates)
-
     logging.info("Total unique updates: %s", len(all_updates))
 
-    # Always save JSON first, even if Firebase has an error.
-    json_saved = save_json(all_updates)
-
-    if not json_saved:
+    if not save_json(all_updates):
         raise RuntimeError("Could not save updates.json")
 
-    # Firebase must succeed for the workflow to be considered successful.
     if not upload_to_firestore(all_updates):
         raise RuntimeError("Firebase upload failed")
 
