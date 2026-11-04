@@ -1,5 +1,5 @@
 requests
 beautifulsoup4
 lxml
-firebase-admin
 pypdf
+firebase-admin
