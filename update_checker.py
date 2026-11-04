@@ -29,10 +29,6 @@ BOARD_SOURCES = {
     ]
 }
 
-
-# हर भर्ती का canonical category name वही होगा
-# जो MainActivity.java में इस्तेमाल किया गया है।
-
 JOB_SOURCES = {
     "Police": [
         "https://csbc.bihar.gov.in/",
@@ -54,12 +50,12 @@ JOB_SOURCES = {
         "https://bpsc.bihar.gov.in/"
     ],
     "Teacher": [
-        "https://bpsc.bihar.gov.in/",
-        "https://bssc.bihar.gov.in/",
-        "https://btsc.bihar.gov.in/"
+        "https://bpsc.bihar.gov.in/"
     ],
     "Defence": [
-        "https://joinindianarmy.nic.in/"
+        "https://www.joinindianavy.gov.in/",
+        "https://afcat.cdac.in/",
+        "https://joinindiancoastguard.cdac.in/"
     ]
 }
 
@@ -90,7 +86,6 @@ NEWS_RSS_SOURCES = {
     ]
 }
 
-
 NEWS_WEB_SOURCES = {
     "Education": [
         "https://state.bihar.gov.in/educationbihar/"
@@ -113,7 +108,6 @@ BOARD_KEYWORDS = [
     "परीक्षा", "सूचना", "पाठ्यक्रम", "मॉडल"
 ]
 
-
 JOB_KEYWORDS = [
     "recruitment", "vacancy", "recruit",
     "application", "apply online", "advertisement",
@@ -126,7 +120,6 @@ JOB_KEYWORDS = [
     "आवेदन", "पद", "अधिसूचना"
 ]
 
-
 EXAM_KEYWORDS = [
     "admit card", "exam date", "examination",
     "answer key", "result", "merit list",
@@ -135,53 +128,6 @@ EXAM_KEYWORDS = [
     "उत्तर कुंजी", "परिणाम", "रिजल्ट"
 ]
 
-
-# Teacher category के लिए विशेष शब्द।
-# BSSC/BTSC के सामान्य नोटिस Teacher category में नहीं आएंगे।
-
-CATEGORY_KEYWORDS = {
-    "Police": [
-        "police", "constable", "sub inspector",
-        "si ", "daroga", "csbc", "bpssc",
-        "सिपाही", "पुलिस", "दरोगा"
-    ],
-    "Army": [
-        "army", "indian army", "agniveer",
-        "soldier", "military", "सेना", "अग्निवीर"
-    ],
-    "Railway": [
-        "railway", "rrb", "rrc", "ntpc",
-        "group d", "technician", "रेलवे"
-    ],
-    "SSC": [
-        "ssc", "staff selection",
-        "cgl", "chsl", "mts", "gd constable"
-    ],
-    "Bank": [
-        "bank", "ibps", "sbi", "rbi",
-        "po", "clerk", "probationary officer"
-    ],
-    "BPSC": [
-        "bpsc", "bihar public service",
-        "civil services", "combined competitive",
-        "बिहार लोक सेवा"
-    ],
-    "Teacher": [
-        "teacher", "teaching", "school teacher",
-        "primary teacher", "middle school teacher",
-        "secondary teacher", "higher secondary",
-        "tre ", "tre-", "tet", "ctet", "stet",
-        "शिक्षक", "अध्यापक", "शिक्षा"
-    ],
-    "Defence": [
-        "navy", "air force", "agniveer",
-        "defence", "defense", "coast guard",
-        "nda", "cds", "iaf", "indian navy",
-        "वायु सेना", "नौसेना", "रक्षा"
-    ]
-}
-
-
 EXAM_ONLY_KEYWORDS = [
     "admit card", "answer key", "exam date",
     "exam schedule", "result", "merit list",
@@ -189,6 +135,55 @@ EXAM_ONLY_KEYWORDS = [
     "परीक्षा तिथि", "रिजल्ट", "परिणाम"
 ]
 
+# Category-specific keywords.
+# छोटे abbreviations के लिए word-boundary matching इस्तेमाल होगा।
+
+CATEGORY_KEYWORDS = {
+    "Police": [
+        "police", "constable", "sub inspector",
+        "daroga", "csbc", "bpssc",
+        "सिपाही", "पुलिस", "दरोगा"
+    ],
+    "Army": [
+        "indian army", "army recruitment",
+        "agniveer army", "soldier",
+        "military", "सेना", "अग्निवीर"
+    ],
+    "Railway": [
+        "railway", "rrb", "rrc", "ntpc",
+        "group d", "technician", "रेलवे"
+    ],
+    "SSC": [
+        "ssc", "staff selection",
+        "cgl", "chsl", "mts", "ssc gd",
+        "gd constable"
+    ],
+    "Bank": [
+        "bank", "ibps", "sbi", "rbi",
+        "bank po", "bank clerk",
+        "probationary officer"
+    ],
+    "BPSC": [
+        "bpsc", "bihar public service",
+        "civil services", "combined competitive",
+        "बिहार लोक सेवा"
+    ],
+    "Teacher": [
+        "teacher recruitment", "school teacher",
+        "primary teacher", "middle school teacher",
+        "secondary teacher", "higher secondary teacher",
+        "tre", "tet", "ctet", "stet",
+        "teacher vacancy", "शिक्षक भर्ती",
+        "शिक्षक नियुक्ति", "अध्यापक भर्ती",
+        "प्रधान शिक्षक", "प्रधानाध्यापक"
+    ],
+    "Defence": [
+        "indian navy", "navy recruitment",
+        "air force", "afcat", "coast guard",
+        "defence", "defense", "nda", "cds",
+        "iaf", "वायु सेना", "नौसेना", "रक्षा"
+    ]
+}
 
 NEWS_KEYWORDS = [
     "bihar", "patna", "muzaffarpur", "darbhanga",
@@ -206,7 +201,6 @@ NEWS_KEYWORDS = [
     "छात्रवृत्ति", "रोजगार", "नौकरी",
     "राजनीति", "चुनाव"
 ]
-
 
 HEADERS = {
     "User-Agent": (
@@ -233,8 +227,24 @@ def clean_text(value):
 
 
 def matches_keyword(title, keywords):
-    text = title.casefold()
-    return any(word.casefold() in text for word in keywords)
+    text = clean_text(title).casefold()
+
+    for keyword in keywords:
+        word = keyword.casefold().strip()
+
+        if not word:
+            continue
+
+        # Short English abbreviations need word boundaries.
+        if re.fullmatch(r"[a-z0-9]+", word) and len(word) <= 4:
+            pattern = r"(?<![a-z0-9])" + re.escape(word) + r"(?![a-z0-9])"
+
+            if re.search(pattern, text):
+                return True
+        elif word in text:
+            return True
+
+    return False
 
 
 def valid_url(url):
@@ -274,16 +284,7 @@ def make_item(category, title, url, source):
 
 
 def category_matches(category, title):
-    """
-    Category-specific title matching.
-    Teacher के लिए विशेष matching जरूरी है।
-    """
-
     keywords = CATEGORY_KEYWORDS.get(category, [])
-
-    if not keywords:
-        return False
-
     return matches_keyword(title, keywords)
 
 
@@ -344,11 +345,6 @@ def scrape_page(session, page_url):
 # ==================================================
 
 def unique_by_url_and_category(items):
-    """
-    एक ही URL अलग-अलग category में हो सकता है।
-    इसलिए URL + category से duplicate हटाएं।
-    """
-
     unique = {}
 
     for item in items:
@@ -357,7 +353,6 @@ def unique_by_url_and_category(items):
             + "|"
             + item.get("url", "").rstrip("/").casefold()
         )
-
         unique[key] = item
 
     return list(unique.values())
@@ -415,10 +410,7 @@ def get_board_updates(session, source_status):
                     "links_found": found
                 })
 
-                print(
-                    f"BOARD: {board} | "
-                    f"Found: {found}"
-                )
+                print(f"BOARD: {board} | Found: {found}")
 
             except Exception as error:
                 source_status.append({
@@ -454,13 +446,8 @@ def get_job_and_exam_updates(session, source_status):
                 for item in links:
                     title = item["title"]
 
-                    # Category-specific matching
-                    category_ok = category_matches(
-                        category,
-                        title
-                    )
-
-                    if not category_ok:
+                    # Strict category check
+                    if not category_matches(category, title):
                         ignored += 1
                         continue
 
@@ -499,10 +486,8 @@ def get_job_and_exam_updates(session, source_status):
                 })
 
                 print(
-                    f"JOB: {category} | "
-                    f"Jobs: {job_found} | "
-                    f"Exam: {exam_found} | "
-                    f"Ignored: {ignored}"
+                    f"JOB: {category} | Jobs: {job_found} | "
+                    f"Exam: {exam_found} | Ignored: {ignored}"
                 )
 
             except Exception as error:
@@ -514,12 +499,7 @@ def get_job_and_exam_updates(session, source_status):
                     "error": str(error)[:500]
                 })
 
-                print(
-                    "JOB ERROR:",
-                    category,
-                    page_url,
-                    error
-                )
+                print("JOB ERROR:", category, page_url, error)
 
     return (
         unique_by_url_and_category(job_updates),
@@ -580,15 +560,13 @@ def get_news_updates(session, source_status):
                     feed_url,
                     timeout=TIMEOUT
                 )
-
                 response.raise_for_status()
 
                 root = ET.fromstring(response.content)
 
                 entries = [
                     node for node in root.iter()
-                    if node.tag.split("}")[-1]
-                    in ("item", "entry")
+                    if node.tag.split("}")[-1] in ("item", "entry")
                 ]
 
                 found = 0
@@ -607,9 +585,7 @@ def get_news_updates(session, source_status):
                         )
 
                         if link_node is not None:
-                            link = link_node.attrib.get(
-                                "href", ""
-                            )
+                            link = link_node.attrib.get("href", "")
 
                     link = link.strip()
 
@@ -659,10 +635,7 @@ def get_news_updates(session, source_status):
                     "links_found": found
                 })
 
-                print(
-                    f"NEWS RSS: {publisher} | "
-                    f"Found: {found}"
-                )
+                print(f"NEWS RSS: {publisher} | Found: {found}")
 
             except Exception as error:
                 source_status.append({
@@ -675,7 +648,6 @@ def get_news_updates(session, source_status):
 
                 print("NEWS RSS ERROR:", feed_url, error)
 
-    # Official government pages
     for category, urls in NEWS_WEB_SOURCES.items():
         for page_url in urls:
             try:
@@ -710,10 +682,7 @@ def get_news_updates(session, source_status):
                     "links_found": found
                 })
 
-                print(
-                    f"OFFICIAL NEWS: {category} | "
-                    f"Found: {found}"
-                )
+                print(f"OFFICIAL NEWS: {category} | Found: {found}")
 
             except Exception as error:
                 source_status.append({
@@ -739,33 +708,24 @@ def get_updates():
 
     source_status = []
 
-    board_updates = get_board_updates(
-        session,
-        source_status
-    )
+    board_updates = get_board_updates(session, source_status)
 
     job_updates, exam_updates = get_job_and_exam_updates(
         session,
         source_status
     )
 
-    news_updates = get_news_updates(
-        session,
-        source_status
-    )
+    news_updates = get_news_updates(session, source_status)
 
     result = {
         "checked_at": now_utc(),
-
         "total_updates": (
             len(board_updates)
             + len(job_updates)
             + len(exam_updates)
             + len(news_updates)
         ),
-
         "source_status": source_status,
-
         "updates": board_updates,
         "board_updates": board_updates,
         "job_updates": job_updates,
@@ -773,11 +733,7 @@ def get_updates():
         "news_updates": news_updates
     }
 
-    with open(
-        "updates.json",
-        "w",
-        encoding="utf-8"
-    ) as file:
+    with open("updates.json", "w", encoding="utf-8") as file:
         json.dump(
             result,
             file,
@@ -801,9 +757,7 @@ def get_updates():
 # ==================================================
 
 def connect_firebase():
-    secret_value = os.environ.get(
-        "FIREBASE_SERVICE_ACCOUNT"
-    )
+    secret_value = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
 
     if not secret_value:
         raise RuntimeError(
@@ -813,10 +767,7 @@ def connect_firebase():
     service_account_info = json.loads(secret_value)
 
     if not firebase_admin._apps:
-        cred = credentials.Certificate(
-            service_account_info
-        )
-
+        cred = credentials.Certificate(service_account_info)
         firebase_admin.initialize_app(cred)
 
     return firestore.client()
@@ -827,19 +778,16 @@ def connect_firebase():
 # ==================================================
 
 def create_document_id(collection_name, item):
-    """
-    Job और exam में category + URL से ID बनेगी।
-    इससे एक category दूसरी category को overwrite नहीं करेगी।
-    """
-
     url = item.get("url", "").strip().rstrip("/")
 
     if collection_name in ("job_updates", "exam_updates"):
         category = item.get("category", "").strip()
         unique_value = category.casefold() + "|" + url.casefold()
+
     elif collection_name == "board_updates":
         board = item.get("board", "").strip()
         unique_value = board.casefold() + "|" + url.casefold()
+
     else:
         category = item.get("category", "").strip()
         unique_value = category.casefold() + "|" + url.casefold()
@@ -851,36 +799,23 @@ def create_document_id(collection_name, item):
 
 def upload_collection(db, collection_name, items):
     if not items:
-        print(
-            f"No items found for {collection_name}"
-        )
+        print(f"No items found for {collection_name}")
         return 0
 
     collection = db.collection(collection_name)
-
     batch = db.batch()
     count = 0
     total = 0
 
     for item in items:
-        document_id = create_document_id(
-            collection_name,
-            item
-        )
-
+        document_id = create_document_id(collection_name, item)
         document = collection.document(document_id)
 
         data = dict(item)
-
-        # यह fetch/update का समय है, भर्ती की वास्तविक तारीख नहीं।
         data["updated_at"] = firestore.SERVER_TIMESTAMP
         data["fetched_at"] = firestore.SERVER_TIMESTAMP
 
-        batch.set(
-            document,
-            data,
-            merge=True
-        )
+        batch.set(document, data, merge=True)
 
         count += 1
         total += 1
@@ -908,29 +843,10 @@ def upload_collection(db, collection_name, items):
 def upload_to_firebase(result):
     db = connect_firebase()
 
-    upload_collection(
-        db,
-        "board_updates",
-        result["board_updates"]
-    )
-
-    upload_collection(
-        db,
-        "job_updates",
-        result["job_updates"]
-    )
-
-    upload_collection(
-        db,
-        "exam_updates",
-        result["exam_updates"]
-    )
-
-    upload_collection(
-        db,
-        "news_updates",
-        result["news_updates"]
-    )
+    upload_collection(db, "board_updates", result["board_updates"])
+    upload_collection(db, "job_updates", result["job_updates"])
+    upload_collection(db, "exam_updates", result["exam_updates"])
+    upload_collection(db, "news_updates", result["news_updates"])
 
     print("\nALL FIREBASE UPLOADS COMPLETED\n")
 
