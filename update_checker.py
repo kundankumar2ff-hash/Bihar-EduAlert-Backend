@@ -1,4 +1,3 @@
-
 import requests
 from bs4 import BeautifulSoup
 import json
@@ -10,6 +9,9 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
+from xml.etree import ElementTree as ET
+from email.utils import parsedate_to_datetime
+from datetime import timedelta
 
 
 # --------------------------------------------------
@@ -59,15 +61,40 @@ JOB_SOURCES = {
 }
 
 
-NEWS_SOURCES = {
-    "Education": [
-        "https://state.bihar.gov.in/educationbihar/"
-    ],
+# Bihar News RSS feeds. RSS feeds provide title, link and publication date.
+# These are third-party publishers; verify each article at its original link.
+NEWS_RSS_SOURCES = {
     "General": [
-        "https://state.bihar.gov.in/prdbihar/",
-        "https://state.bihar.gov.in/main/CitizenHome.html"
-    ]
+        ("Hindustan Bihar", "https://api.livehindustan.com/feeds/rss/bihar/rssfeed.xml"),
+        ("Amar Ujala Bihar", "https://www.amarujala.com/rss/bihar.xml"),
+        ("Prabhat Khabar State", "https://www.prabhatkhabar.com/state/feed/"),
+    ],
+    "District": [
+        ("Hindustan Patna", "https://api.livehindustan.com/feeds/rss/bihar/patna/rssfeed.xml"),
+        ("Hindustan Muzaffarpur", "https://api.livehindustan.com/feeds/rss/bihar/muzaffarpur/rssfeed.xml"),
+        ("Hindustan Darbhanga", "https://api.livehindustan.com/feeds/rss/bihar/darbhanga/rssfeed.xml"),
+        ("Hindustan Purnia", "https://api.livehindustan.com/feeds/rss/bihar/purnia/rssfeed.xml"),
+        ("Hindustan Katihar", "https://api.livehindustan.com/feeds/rss/bihar/katihar/rssfeed.xml"),
+        ("Hindustan Bhagalpur", "https://api.livehindustan.com/feeds/rss/bihar/bhagalpur/rssfeed.xml"),
+        ("Hindustan Gaya", "https://api.livehindustan.com/feeds/rss/bihar/gaya/rssfeed.xml"),
+        ("Hindustan Begusarai", "https://api.livehindustan.com/feeds/rss/bihar/begusarai/rssfeed.xml"),
+        ("Hindustan Araria", "https://api.livehindustan.com/feeds/rss/bihar/araria/rssfeed.xml"),
+        ("Hindustan Kishanganj", "https://api.livehindustan.com/feeds/rss/bihar/kishanganj/rssfeed.xml"),
+    ],
+    "Education": [
+        ("Hindustan Education", "https://api.livehindustan.com/feeds/rss/career/education/rssfeed.xml"),
+    ],
+    "Employment": [
+        ("Hindustan Jobs", "https://api.livehindustan.com/feeds/rss/career/jobs/rssfeed.xml"),
+    ],
 }
+
+# Official Bihar pages remain useful for government announcements.
+NEWS_WEB_SOURCES = {
+    "Education": ["https://state.bihar.gov.in/educationbihar/"],
+    "Govt Scheme": ["https://state.bihar.gov.in/prdbihar/", "https://cm.bihar.gov.in/users/NewsN.aspx"],
+}
+
 
 
 # --------------------------------------------------
@@ -100,10 +127,15 @@ EXAM_KEYWORDS = [
 ]
 
 NEWS_KEYWORDS = [
-    "news", "notice", "announcement", "scheme",
-    "scholarship", "education", "student",
-    "yojana", "छात्रवृत्ति", "योजना",
-    "शिक्षा", "विद्यार्थी", "सूचना"
+    "bihar", "patna", "muzaffarpur", "darbhanga", "purnia", "katihar",
+    "bhagalpur", "gaya", "araria", "kishanganj", "begusarai",
+    "education", "school", "college", "university", "student",
+    "government", "scheme", "yojana", "scholarship", "employment",
+    "job", "recruitment", "politics", "election", "weather", "flood",
+    "बारिश", "बाढ़", "मौसम", "बिहार", "पटना", "मुजफ्फरपुर",
+    "दरभंगा", "पूर्णिया", "कटिहार", "भागलपुर", "गया", "अररिया",
+    "किशनगंज", "बेगूसराय", "शिक्षा", "स्कूल", "कॉलेज", "योजना",
+    "छात्रवृत्ति", "रोजगार", "नौकरी", "राजनीति", "चुनाव"
 ]
 
 
@@ -375,60 +407,106 @@ def get_job_and_exam_updates(session, source_status):
 # 7. FETCH BIHAR NEWS
 # --------------------------------------------------
 
+def parse_rss_date(value):
+    if not value:
+        return None
+    try:
+        dt = parsedate_to_datetime(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def rss_text(element, name):
+    node = element.find(name)
+    if node is None:
+        # RSS feeds sometimes use namespaced elements.
+        node = next((x for x in element if x.tag.split("}")[-1] == name), None)
+    if node is None:
+        return ""
+    return clean_text("".join(node.itertext()))
+
+
 def get_news_updates(session, source_status):
-
     updates = []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
 
-    for category, urls in NEWS_SOURCES.items():
+    # First read RSS feeds: they provide the actual publication date.
+    for category, sources in NEWS_RSS_SOURCES.items():
+        for publisher, feed_url in sources:
+            try:
+                response = session.get(feed_url, timeout=TIMEOUT)
+                response.raise_for_status()
+                root = ET.fromstring(response.content)
+                entries = [node for node in root.iter() if node.tag.split("}")[-1] in ("item", "entry")]
+                found = 0
 
+                for entry in entries:
+                    title = rss_text(entry, "title")
+                    link = rss_text(entry, "link")
+                    if not link:
+                        link_node = next((x for x in entry if x.tag.split("}")[-1] == "link"), None)
+                        if link_node is not None:
+                            link = link_node.attrib.get("href", "")
+                    link = link.strip()
+                    if not title or not link:
+                        continue
+                    full_url = urljoin(feed_url, link)
+                    if not valid_url(full_url):
+                        continue
+
+                    date_value = rss_text(entry, "pubDate") or rss_text(entry, "published") or rss_text(entry, "updated")
+                    published = parse_rss_date(date_value)
+                    # Do not import undated or clearly old RSS entries as fresh news.
+                    if published is None or published < cutoff:
+                        continue
+
+                    description = rss_text(entry, "description") or rss_text(entry, "summary") or title
+                    updates.append({
+                        "category": category,
+                        "title": title,
+                        "url": full_url,
+                        "source": publisher,
+                        "description": description[:1200],
+                        "published_at": published.isoformat(),
+                        "checked_at": now_utc()
+                    })
+                    found += 1
+
+                source_status.append({"type": "news_rss", "category": category, "source": feed_url, "status": "success", "links_found": found})
+                print(f"NEWS RSS: {publisher} | Found: {found}")
+            except Exception as error:
+                source_status.append({"type": "news_rss", "category": category, "source": feed_url, "status": "error", "error": str(error)[:500]})
+                print("NEWS RSS ERROR:", feed_url, error)
+
+    # Also scrape official Bihar government announcement pages. These pages
+    # may not expose publication dates, so mark their date as unverified.
+    for category, urls in NEWS_WEB_SOURCES.items():
         for page_url in urls:
-
             try:
                 links = scrape_page(session, page_url)
                 found = 0
-
                 for item in links:
-
-                    if not matches_keyword(
-                        item["title"],
-                        NEWS_KEYWORDS
-                    ):
+                    if not matches_keyword(item["title"], NEWS_KEYWORDS):
                         continue
-
-                    updates.append(
-                        make_item(
-                            category,
-                            item["title"],
-                            item["url"],
-                            page_url
-                        )
-                    )
-
+                    updates.append({
+                        "category": category,
+                        "title": item["title"],
+                        "url": item["url"],
+                        "source": page_url,
+                        "description": item["title"],
+                        "published_at": "",
+                        "date_status": "unverified",
+                        "checked_at": now_utc()
+                    })
                     found += 1
-
-                source_status.append({
-                    "type": "news",
-                    "category": category,
-                    "source": page_url,
-                    "status": "success",
-                    "links_found": found
-                })
-
-                print(
-                    f"NEWS: {category} | Found: {found}"
-                )
-
+                source_status.append({"type": "news_official", "category": category, "source": page_url, "status": "success", "links_found": found})
+                print(f"OFFICIAL NEWS: {category} | Found: {found}")
             except Exception as error:
-
-                source_status.append({
-                    "type": "news",
-                    "category": category,
-                    "source": page_url,
-                    "status": "error",
-                    "error": str(error)
-                })
-
-                print("NEWS ERROR:", page_url, error)
+                source_status.append({"type": "news_official", "category": category, "source": page_url, "status": "error", "error": str(error)[:500]})
+                print("OFFICIAL NEWS ERROR:", page_url, error)
 
     return unique_by_url(updates)
 
@@ -574,7 +652,8 @@ def upload_collection(db, collection_name, items):
 
         data = dict(item)
 
-        data["updated_at"] = firestore.SERVER_TIMESTAMP
+        data["updated_at"] = firestore.SERVER_TIMESTAMP  # fetch time; not the article publication date
+        data["fetched_at"] = firestore.SERVER_TIMESTAMP
 
         batch.set(
             document,
