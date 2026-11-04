@@ -1,3 +1,4 @@
+
 name: Bihar EduAlert Automatic Updates
 
 on:
@@ -27,8 +28,14 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: python update_checker.py
 
+      - name: Automatically extract and update MCQs
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: python mcq_extractor.py
+
       - name: Save update file
         uses: actions/upload-artifact@v4
         with:
           name: Bihar-CBSE-Updates
           path: updates.json
+          if-no-files-found: warn
