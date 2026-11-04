@@ -1,206 +1,34 @@
-import requests
-from bs4 import BeautifulSoup
-import json
-import re
 import os
+import re
+import json
 import hashlib
-import firebase_admin
-
-from firebase_admin import credentials, firestore
+import logging
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urljoin, urlparse
-from xml.etree import ElementTree as ET
+from urllib.parse import urljoin
 from email.utils import parsedate_to_datetime
 
-
-# ==================================================
-# 1. OFFICIAL WEBSITE SOURCES
-# ==================================================
-
-BOARD_SOURCES = {
-    "Bihar Board": [
-        "https://www.biharboardonline.org/home",
-        "https://exam.biharboardonline.org/",
-        "https://intermediate.biharboardonline.com/"
-    ],
-    "CBSE Board": [
-        "https://www.cbse.gov.in/cbsenew/examination_circular.html",
-        "https://cbseacademic.nic.in/circulars.html"
-    ]
-}
-
-JOB_SOURCES = {
-    "Police": [
-        "https://csbc.bihar.gov.in/",
-        "https://bpssc.bihar.gov.in/"
-    ],
-    "Army": [
-        "https://joinindianarmy.nic.in/"
-    ],
-    "Railway": [
-        "https://www.rrbapply.gov.in/"
-    ],
-    "SSC": [
-        "https://ssc.gov.in/"
-    ],
-    "Bank": [
-        "https://www.ibps.in/"
-    ],
-    "BPSC": [
-        "https://bpsc.bihar.gov.in/"
-    ],
-    "Teacher": [
-        "https://bpsc.bihar.gov.in/"
-    ],
-    "Defence": [
-        "https://www.joinindianavy.gov.in/",
-        "https://afcat.cdac.in/",
-        "https://joinindiancoastguard.cdac.in/"
-    ]
-}
+import requests
+from bs4 import BeautifulSoup
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 
-NEWS_RSS_SOURCES = {
-    "General": [
-        ("Hindustan Bihar", "https://api.livehindustan.com/feeds/rss/bihar/rssfeed.xml"),
-        ("Amar Ujala Bihar", "https://www.amarujala.com/rss/bihar.xml"),
-        ("Prabhat Khabar State", "https://www.prabhatkhabar.com/state/feed/")
-    ],
-    "District": [
-        ("Hindustan Patna", "https://api.livehindustan.com/feeds/rss/bihar/patna/rssfeed.xml"),
-        ("Hindustan Muzaffarpur", "https://api.livehindustan.com/feeds/rss/bihar/muzaffarpur/rssfeed.xml"),
-        ("Hindustan Darbhanga", "https://api.livehindustan.com/feeds/rss/bihar/darbhanga/rssfeed.xml"),
-        ("Hindustan Purnia", "https://api.livehindustan.com/feeds/rss/bihar/purnia/rssfeed.xml"),
-        ("Hindustan Katihar", "https://api.livehindustan.com/feeds/rss/bihar/katihar/rssfeed.xml"),
-        ("Hindustan Bhagalpur", "https://api.livehindustan.com/feeds/rss/bihar/bhagalpur/rssfeed.xml"),
-        ("Hindustan Gaya", "https://api.livehindustan.com/feeds/rss/bihar/gaya/rssfeed.xml"),
-        ("Hindustan Begusarai", "https://api.livehindustan.com/feeds/rss/bihar/begusarai/rssfeed.xml"),
-        ("Hindustan Araria", "https://api.livehindustan.com/feeds/rss/bihar/araria/rssfeed.xml"),
-        ("Hindustan Kishanganj", "https://api.livehindustan.com/feeds/rss/bihar/kishanganj/rssfeed.xml")
-    ],
-    "Education": [
-        ("Hindustan Education", "https://api.livehindustan.com/feeds/rss/career/education/rssfeed.xml")
-    ],
-    "Employment": [
-        ("Hindustan Jobs", "https://api.livehindustan.com/feeds/rss/career/jobs/rssfeed.xml")
-    ]
-}
+# =========================================================
+# SETTINGS
+# =========================================================
 
-NEWS_WEB_SOURCES = {
-    "Education": [
-        "https://state.bihar.gov.in/educationbihar/"
-    ],
-    "Govt Scheme": [
-        "https://state.bihar.gov.in/prdbihar/",
-        "https://cm.bihar.gov.in/users/NewsN.aspx"
-    ]
-}
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
+IST = timezone(timedelta(hours=5, minutes=30))
+UTC = timezone.utc
+NOW = datetime.now(UTC)
 
-# ==================================================
-# 2. KEYWORDS
-# ==================================================
-
-BOARD_KEYWORDS = [
-    "notice", "circular", "result", "admit",
-    "exam", "syllabus", "date sheet", "model paper",
-    "notification", "registration", "विज्ञप्ति",
-    "परीक्षा", "सूचना", "पाठ्यक्रम", "मॉडल"
-]
-
-JOB_KEYWORDS = [
-    "recruitment", "vacancy", "recruit",
-    "application", "apply online", "advertisement",
-    "notification", "post", "constable",
-    "sub inspector", "agniveer", "group d",
-    "ntpc", "technician", "assistant",
-    "teacher", "lecturer", "officer",
-    "clerk", "engineer", "bharti",
-    "रिक्ति", "भर्ती", "नियुक्ति",
-    "आवेदन", "पद", "अधिसूचना"
-]
-
-EXAM_KEYWORDS = [
-    "admit card", "exam date", "examination",
-    "answer key", "result", "merit list",
-    "cut off", "cutoff", "exam notice",
-    "प्रवेश पत्र", "परीक्षा तिथि",
-    "उत्तर कुंजी", "परिणाम", "रिजल्ट"
-]
-
-EXAM_ONLY_KEYWORDS = [
-    "admit card", "answer key", "exam date",
-    "exam schedule", "result", "merit list",
-    "प्रवेश पत्र", "उत्तर कुंजी",
-    "परीक्षा तिथि", "रिजल्ट", "परिणाम"
-]
-
-# Category-specific keywords.
-# छोटे abbreviations के लिए word-boundary matching इस्तेमाल होगा।
-
-CATEGORY_KEYWORDS = {
-    "Police": [
-        "police", "constable", "sub inspector",
-        "daroga", "csbc", "bpssc",
-        "सिपाही", "पुलिस", "दरोगा"
-    ],
-    "Army": [
-        "indian army", "army recruitment",
-        "agniveer army", "soldier",
-        "military", "सेना", "अग्निवीर"
-    ],
-    "Railway": [
-        "railway", "rrb", "rrc", "ntpc",
-        "group d", "technician", "रेलवे"
-    ],
-    "SSC": [
-        "ssc", "staff selection",
-        "cgl", "chsl", "mts", "ssc gd",
-        "gd constable"
-    ],
-    "Bank": [
-        "bank", "ibps", "sbi", "rbi",
-        "bank po", "bank clerk",
-        "probationary officer"
-    ],
-    "BPSC": [
-        "bpsc", "bihar public service",
-        "civil services", "combined competitive",
-        "बिहार लोक सेवा"
-    ],
-    "Teacher": [
-        "teacher recruitment", "school teacher",
-        "primary teacher", "middle school teacher",
-        "secondary teacher", "higher secondary teacher",
-        "tre", "tet", "ctet", "stet",
-        "teacher vacancy", "शिक्षक भर्ती",
-        "शिक्षक नियुक्ति", "अध्यापक भर्ती",
-        "प्रधान शिक्षक", "प्रधानाध्यापक"
-    ],
-    "Defence": [
-        "indian navy", "navy recruitment",
-        "air force", "afcat", "coast guard",
-        "defence", "defense", "nda", "cds",
-        "iaf", "वायु सेना", "नौसेना", "रक्षा"
-    ]
-}
-
-NEWS_KEYWORDS = [
-    "bihar", "patna", "muzaffarpur", "darbhanga",
-    "purnia", "katihar", "bhagalpur", "gaya",
-    "araria", "kishanganj", "begusarai",
-    "education", "school", "college", "university",
-    "student", "government", "scheme", "yojana",
-    "scholarship", "employment", "job",
-    "recruitment", "politics", "election",
-    "weather", "flood", "बारिश", "बाढ़",
-    "मौसम", "बिहार", "पटना", "मुजफ्फरपुर",
-    "दरभंगा", "पूर्णिया", "कटिहार", "भागलपुर",
-    "गया", "अररिया", "किशनगंज", "बेगूसराय",
-    "शिक्षा", "स्कूल", "कॉलेज", "योजना",
-    "छात्रवृत्ति", "रोजगार", "नौकरी",
-    "राजनीति", "चुनाव"
-]
+REQUEST_TIMEOUT = 25
+MAX_AGE_DAYS = 30
+BATCH_SIZE = 400
 
 HEADERS = {
     "User-Agent": (
@@ -209,652 +37,770 @@ HEADERS = {
     )
 }
 
-TIMEOUT = 30
+# =========================================================
+# OFFICIAL BOARD SOURCES
+# =========================================================
 
+BOARD_SOURCES = [
+    {"category": "Bihar Board", "url": "https://biharboardonline.bihar.gov.in/"},
+    {"category": "Bihar Board", "url": "https://secondary.biharboardonline.com/"},
+    {"category": "Bihar Board", "url": "https://results.biharboardonline.com/"},
+    {"category": "CBSE Board", "url": "https://www.cbse.gov.in/"},
+    {"category": "CBSE Board", "url": "https://cbseacademic.nic.in/"},
+]
 
-# ==================================================
-# 3. COMMON FUNCTIONS
-# ==================================================
+# =========================================================
+# JOB SOURCES
+# =========================================================
 
-def now_utc():
-    return datetime.now(timezone.utc).isoformat()
+JOB_SOURCES = [
+    {"category": "Police", "url": "https://csbc.bihar.gov.in/"},
+    {"category": "Police", "url": "https://bpssc.bihar.gov.in/"},
+    {"category": "Army", "url": "https://joinindianarmy.nic.in/"},
+    {"category": "Railway", "url": "https://www.rrbapply.gov.in/"},
+    {"category": "SSC", "url": "https://ssc.gov.in/"},
+    {"category": "Bank", "url": "https://www.ibps.in/"},
+    {"category": "BPSC", "url": "https://bpsc.bihar.gov.in/"},
+    {"category": "Teacher", "url": "https://bpsc.bihar.gov.in/"},
+    {"category": "Teacher", "url": "https://bssc.bihar.gov.in/"},
+    {"category": "Teacher", "url": "https://btsc.bihar.gov.in/"},
+    {"category": "Defence", "url": "https://afcat.cdac.in/"},
+    {"category": "Defence", "url": "https://joinindiannavy.gov.in/"},
+    {"category": "Defence", "url": "https://joinindiancoastguard.cdac.in/"},
+]
 
+# =========================================================
+# NEWS RSS SOURCES
+# =========================================================
+
+NEWS_RSS_SOURCES = [
+    {"name": "Hindustan Bihar", "url": "https://www.livehindustan.com/rss/bihar.xml"},
+    {"name": "Amar Ujala Bihar", "url": "https://www.amarujala.com/rss/bihar.xml"},
+    {"name": "Prabhat Khabar Bihar", "url": "https://www.prabhatkhabar.com/feed"},
+    {"name": "Hindustan Education", "url": "https://www.livehindustan.com/rss/education.xml"},
+    {"name": "Hindustan Jobs", "url": "https://www.livehindustan.com/rss/career.xml"},
+]
+
+# =========================================================
+# KEYWORDS
+# =========================================================
+
+JOB_KEYWORDS = [
+    "recruitment", "vacancy", "notification", "application",
+    "online form", "apply online", "admit card", "result",
+    "भर्ती", "रिक्ति", "विज्ञापन", "आवेदन", "प्रवेश पत्र",
+    "परिणाम", "नियुक्ति"
+]
+
+EXAM_KEYWORDS = [
+    "exam date", "examination", "exam schedule", "time table",
+    "date sheet", "answer key", "exam notice", "प्रवेश परीक्षा",
+    "परीक्षा", "परीक्षा तिथि", "उत्तर कुंजी", "समय सारणी"
+]
+
+CATEGORY_KEYWORDS = {
+    "Police": [
+        "police", "constable", "sub inspector", "si recruitment",
+        "daroga", "सिपाही", "पुलिस", "दरोगा"
+    ],
+    "Army": [
+        "indian army", "agniveer army", "army recruitment",
+        "अग्निवीर सेना", "भारतीय सेना"
+    ],
+    "Railway": [
+        "railway", "rrb", "rrc", "ntpc", "group d",
+        "रेलवे", "रेल भर्ती"
+    ],
+    "SSC": [
+        "staff selection commission", "ssc cgl", "ssc chsl",
+        "ssc gd", "mts", "स्टाफ सिलेक्शन"
+    ],
+    "Bank": [
+        "ibps", "sbi po", "sbi clerk", "bank recruitment",
+        "banking", "बैंक भर्ती"
+    ],
+    "BPSC": [
+        "bpsc", "bihar public service commission",
+        "बिहार लोक सेवा आयोग"
+    ],
+    "Teacher": [
+        "teacher recruitment", "school teacher", "tre",
+        "tet", "bihar teacher", "शिक्षक भर्ती", "अध्यापक भर्ती"
+    ],
+    "Defence": [
+        "air force", "navy", "coast guard", "afcat",
+        "agniveer vayu", "agniveer navy", "वायु सेना",
+        "नौसेना", "तटरक्षक"
+    ],
+}
+
+# =========================================================
+# GENERAL HELPERS
+# =========================================================
 
 def clean_text(value):
-    value = re.sub(r"<[^>]+>", " ", str(value))
-    value = re.sub(r"\s+", " ", value)
-    return value.strip()
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip()
 
 
-def matches_keyword(title, keywords):
-    text = clean_text(title).casefold()
+def make_id(category, url):
+    raw = f"{category}|{url}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
-    for keyword in keywords:
-        word = keyword.casefold().strip()
 
-        if not word:
+def parse_date(value):
+    """Convert common date strings into timezone-aware UTC datetime."""
+    if not value:
+        return None
+
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    value = clean_text(value)
+
+    try:
+        parsed = parsedate_to_datetime(value)
+        if parsed:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            return parsed.astimezone(UTC)
+    except Exception:
+        pass
+
+    formats = [
+        "%Y-%m-%d",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%d.%m.%Y",
+        "%d %B %Y",
+        "%d %b %Y",
+        "%Y/%m/%d",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(value, fmt).replace(tzinfo=UTC)
+        except ValueError:
             continue
 
-        # Short English abbreviations need word boundaries.
-        if re.fullmatch(r"[a-z0-9]+", word) and len(word) <= 4:
-            pattern = r"(?<![a-z0-9])" + re.escape(word) + r"(?![a-z0-9])"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+    except Exception:
+        return None
 
-            if re.search(pattern, text):
+
+def find_deadline(text):
+    """
+    Conservative deadline extraction.
+    Only dates close to deadline-related labels are considered.
+    """
+    if not text:
+        return None
+
+    patterns = [
+        r"(?:last date|closing date| आवेदन की अंतिम तिथि|अंतिम तिथि|आवेदन की अंतिम तारीख)"
+        r"\s*[:\-]?\s*(\d{1,2}[./-]\d{1,2}[./-]\d{4})",
+
+        r"(?:last date|closing date|अंतिम तिथि|अंतिम तारीख)"
+        r"\s*[:\-]?\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            result = parse_date(match.group(1))
+            if result:
+                return result
+
+    return None
+
+
+def page_request(url):
+    try:
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=REQUEST_TIMEOUT
+        )
+        response.raise_for_status()
+        return response
+    except Exception as error:
+        logging.warning("Page error %s : %s", url, error)
+        return None
+
+
+def keyword_match(text, keywords):
+    text = clean_text(text).casefold()
+    return any(word.casefold() in text for word in keywords)
+
+
+def category_match(title, category):
+    title = clean_text(title).casefold()
+    keywords = CATEGORY_KEYWORDS.get(category, [])
+
+    for keyword in keywords:
+        keyword = keyword.casefold()
+
+        # Short English terms are matched as complete words.
+        if keyword.isascii() and len(keyword) <= 4:
+            if re.search(r"\b" + re.escape(keyword) + r"\b", title):
                 return True
-        elif word in text:
+        elif keyword in title:
             return True
 
     return False
 
 
-def valid_url(url):
-    try:
-        parsed = urlparse(url)
-        return (
-            parsed.scheme in ("http", "https")
-            and bool(parsed.netloc)
-        )
-    except Exception:
-        return False
+def get_page_links(url):
+    response = page_request(url)
+    if not response:
+        return []
 
+    soup = BeautifulSoup(response.text, "html.parser")
+    results = []
 
-def get_title(link):
-    title = link.get_text(" ", strip=True)
-
-    if not title:
-        title = link.get("title", "")
-
-    if not title:
-        img = link.find("img")
-        if img:
-            title = img.get("alt", "")
-
-    return clean_text(title)
-
-
-def make_item(category, title, url, source):
-    return {
-        "category": category,
-        "title": title,
-        "url": url,
-        "source": source,
-        "description": title,
-        "checked_at": now_utc()
-    }
-
-
-def category_matches(category, title):
-    keywords = CATEGORY_KEYWORDS.get(category, [])
-    return matches_keyword(title, keywords)
-
-
-def is_job_title(title):
-    return matches_keyword(title, JOB_KEYWORDS)
-
-
-def is_exam_title(title):
-    return matches_keyword(title, EXAM_KEYWORDS)
-
-
-# ==================================================
-# 4. SCRAPE WEBSITE LINKS
-# ==================================================
-
-def scrape_page(session, page_url):
-    response = session.get(
-        page_url,
-        timeout=TIMEOUT
-    )
-
-    response.raise_for_status()
-
-    soup = BeautifulSoup(
-        response.content,
-        "html.parser"
-    )
-
-    found_links = []
-
-    for link in soup.find_all("a", href=True):
-        title = get_title(link)
+    for anchor in soup.find_all("a", href=True):
+        title = clean_text(anchor.get_text(" ", strip=True))
+        link = urljoin(url, anchor["href"])
 
         if not title or len(title) < 4:
             continue
 
-        href = link.get("href", "").strip()
-
-        if not href:
+        if not link.startswith(("http://", "https://")):
             continue
 
-        full_url = urljoin(page_url, href)
-
-        if not valid_url(full_url):
-            continue
-
-        found_links.append({
+        results.append({
             "title": title,
-            "url": full_url,
-            "source": page_url
+            "url": link
         })
 
-    return found_links
+    return results
 
 
-# ==================================================
-# 5. REMOVE DUPLICATES
-# ==================================================
+def classify_job(title, source_category):
+    """
+    A source category is only a hint.
+    The title must also contain a matching category keyword.
+    """
+    if category_match(title, source_category):
+        return source_category
 
-def unique_by_url_and_category(items):
-    unique = {}
-
-    for item in items:
-        key = (
-            item.get("category", "").casefold()
-            + "|"
-            + item.get("url", "").rstrip("/").casefold()
-        )
-        unique[key] = item
-
-    return list(unique.values())
+    return None
 
 
-def unique_by_board_and_url(items):
-    unique = {}
-
-    for item in items:
-        key = (
-            item.get("board", "").casefold()
-            + "|"
-            + item.get("url", "").rstrip("/").casefold()
-        )
-        unique[key] = item
-
-    return list(unique.values())
+def is_job_or_exam(title):
+    is_job = keyword_match(title, JOB_KEYWORDS)
+    is_exam = keyword_match(title, EXAM_KEYWORDS)
+    return is_job, is_exam
 
 
-# ==================================================
-# 6. FETCH BOARD UPDATES
-# ==================================================
+# =========================================================
+# BOARD UPDATES
+# =========================================================
 
-def get_board_updates(session, source_status):
+def get_board_updates(source_status):
     updates = []
 
-    for board, urls in BOARD_SOURCES.items():
-        for page_url in urls:
-            try:
-                links = scrape_page(session, page_url)
-                found = 0
+    for source in BOARD_SOURCES:
+        url = source["url"]
+        category = source["category"]
 
-                for item in links:
-                    if not matches_keyword(
-                        item["title"],
-                        BOARD_KEYWORDS
-                    ):
-                        continue
+        links = get_page_links(url)
+        source_status[url] = {
+            "status": "success" if links else "no_links_or_error",
+            "links_found": len(links)
+        }
 
-                    updates.append({
-                        "board": board,
-                        "title": item["title"],
-                        "url": item["url"],
-                        "source": page_url,
-                        "checked_at": now_utc()
-                    })
+        for item in links:
+            title = item["title"]
 
-                    found += 1
+            if len(title) < 6:
+                continue
 
-                source_status.append({
-                    "type": "board",
-                    "category": board,
-                    "source": page_url,
-                    "status": "success",
-                    "links_found": found
-                })
-
-                print(f"BOARD: {board} | Found: {found}")
-
-            except Exception as error:
-                source_status.append({
-                    "type": "board",
-                    "category": board,
-                    "source": page_url,
-                    "status": "error",
-                    "error": str(error)[:500]
-                })
-
-                print("BOARD ERROR:", page_url, error)
-
-    return unique_by_board_and_url(updates)
-
-
-# ==================================================
-# 7. FETCH JOB AND EXAM UPDATES
-# ==================================================
-
-def get_job_and_exam_updates(session, source_status):
-    job_updates = []
-    exam_updates = []
-
-    for category, urls in JOB_SOURCES.items():
-        for page_url in urls:
-            try:
-                links = scrape_page(session, page_url)
-
-                job_found = 0
-                exam_found = 0
-                ignored = 0
-
-                for item in links:
-                    title = item["title"]
-
-                    # Strict category check
-                    if not category_matches(category, title):
-                        ignored += 1
-                        continue
-
-                    # Job notice
-                    if is_job_title(title):
-                        job_updates.append(
-                            make_item(
-                                category,
-                                title,
-                                item["url"],
-                                page_url
-                            )
-                        )
-                        job_found += 1
-
-                    # Exam notice
-                    if is_exam_title(title):
-                        exam_updates.append(
-                            make_item(
-                                category,
-                                title,
-                                item["url"],
-                                page_url
-                            )
-                        )
-                        exam_found += 1
-
-                source_status.append({
-                    "type": "job",
+            if keyword_match(
+                title,
+                [
+                    "notice", "notification", "result", "admit",
+                    "exam", "time table", "date sheet", "syllabus",
+                    "नोटिस", "सूचना", "परीक्षा", "परिणाम",
+                    "प्रवेश पत्र", "पाठ्यक्रम"
+                ]
+            ):
+                updates.append({
                     "category": category,
-                    "source": page_url,
-                    "status": "success",
-                    "job_links_found": job_found,
-                    "exam_links_found": exam_found,
-                    "ignored_links": ignored
+                    "title": title,
+                    "url": item["url"],
+                    "source": url,
+                    "type": "board",
+                    "published_at": None
                 })
 
-                print(
-                    f"JOB: {category} | Jobs: {job_found} | "
-                    f"Exam: {exam_found} | Ignored: {ignored}"
-                )
-
-            except Exception as error:
-                source_status.append({
-                    "type": "job",
-                    "category": category,
-                    "source": page_url,
-                    "status": "error",
-                    "error": str(error)[:500]
-                })
-
-                print("JOB ERROR:", category, page_url, error)
-
-    return (
-        unique_by_url_and_category(job_updates),
-        unique_by_url_and_category(exam_updates)
-    )
+    return updates
 
 
-# ==================================================
-# 8. FETCH BIHAR NEWS
-# ==================================================
+# =========================================================
+# JOB AND EXAM UPDATES
+# =========================================================
 
-def parse_rss_date(value):
-    if not value:
+def get_job_and_exam_updates(source_status):
+    jobs = []
+    exams = []
+
+    for source in JOB_SOURCES:
+        source_url = source["url"]
+        source_category = source["category"]
+
+        links = get_page_links(source_url)
+
+        source_status[source_url] = {
+            "status": "success" if links else "no_links_or_error",
+            "links_found": len(links)
+        }
+
+        for item in links:
+            title = item["title"]
+            link = item["url"]
+
+            if len(title) < 6:
+                continue
+
+            is_job, is_exam = is_job_or_exam(title)
+
+            category = classify_job(title, source_category)
+
+            if not category:
+                continue
+
+            deadline = find_deadline(title)
+
+            common = {
+                "category": category,
+                "title": title,
+                "url": link,
+                "source": source_url,
+                "last_date": deadline.isoformat() if deadline else None
+            }
+
+            if is_job:
+                job_item = dict(common)
+                job_item["type"] = "job"
+                jobs.append(job_item)
+
+            if is_exam:
+                exam_item = dict(common)
+                exam_item["type"] = "exam"
+                exams.append(exam_item)
+
+    return jobs, exams
+
+
+# =========================================================
+# NEWS RSS
+# =========================================================
+
+def get_news_updates(source_status):
+    news = []
+
+    for source in NEWS_RSS_SOURCES:
+        feed_url = source["url"]
+        response = page_request(feed_url)
+
+        if not response:
+            source_status[feed_url] = {
+                "status": "error",
+                "links_found": 0
+            }
+            continue
+
+        soup = BeautifulSoup(response.content, "xml")
+        items = soup.find_all(["item", "entry"])
+
+        source_status[feed_url] = {
+            "status": "success" if items else "no_items",
+            "links_found": len(items)
+        }
+
+        for item in items:
+            title_tag = item.find("title")
+            link_tag = item.find("link")
+            date_tag = (
+                item.find("pubDate")
+                or item.find("published")
+                or item.find("updated")
+            )
+            description_tag = (
+                item.find("description")
+                or item.find("summary")
+            )
+
+            title = clean_text(
+                title_tag.get_text(" ", strip=True) if title_tag else ""
+            )
+
+            link = ""
+            if link_tag:
+                link = link_tag.get("href") or link_tag.get_text(strip=True)
+
+            link = urljoin(feed_url, link)
+
+            published = None
+            if date_tag:
+                published = parse_date(date_tag.get_text(" ", strip=True))
+
+            description = clean_text(
+                description_tag.get_text(" ", strip=True)
+                if description_tag else ""
+            )
+
+            if not title or not link:
+                continue
+
+            # Skip news already older than 30 days.
+            if published and published < NOW - timedelta(days=MAX_AGE_DAYS):
+                continue
+
+            news.append({
+                "category": "Bihar News",
+                "title": title,
+                "description": description[:1000],
+                "url": link,
+                "source": source["name"],
+                "type": "news",
+                "published_at": published.isoformat() if published else None
+            })
+
+    return news
+
+
+# =========================================================
+# REMOVE DUPLICATES
+# =========================================================
+
+def unique_updates(items):
+    output = []
+    seen = set()
+
+    for item in items:
+        url = clean_text(item.get("url"))
+        category = clean_text(item.get("category"))
+        key = (category, url)
+
+        if not url or key in seen:
+            continue
+
+        seen.add(key)
+        output.append(item)
+
+    return output
+
+
+# =========================================================
+# FIREBASE CONNECTION
+# =========================================================
+
+def connect_firebase():
+    service_account_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+
+    if not service_account_json:
+        logging.warning(
+            "FIREBASE_SERVICE_ACCOUNT secret not found. "
+            "JSON will be created, but Firebase upload/delete is skipped."
+        )
         return None
 
     try:
-        dt = parsedate_to_datetime(value)
+        service_account_info = json.loads(service_account_json)
+        credential = credentials.Certificate(service_account_info)
 
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(credential)
 
-        return dt.astimezone(timezone.utc)
+        return firestore.client()
 
-    except Exception:
+    except Exception as error:
+        logging.exception("Firebase connection failed: %s", error)
         return None
 
 
-def rss_text(element, name):
-    node = element.find(name)
+# =========================================================
+# FIRESTORE DATE HELPERS
+# =========================================================
 
-    if node is None:
-        node = next(
-            (
-                x for x in element
-                if x.tag.split("}")[-1] == name
-            ),
-            None
+def firestore_datetime(value):
+    if not value:
+        return None
+
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    return parse_date(value)
+
+
+def get_first_seen(existing_data):
+    if existing_data:
+        old_date = firestore_datetime(existing_data.get("first_seen_at"))
+        if old_date:
+            return old_date
+
+    return NOW
+
+
+def upload_collection(db, collection_name, items):
+    """
+    Upload documents while preserving first_seen_at.
+    Existing documents keep their original first_seen_at.
+    """
+    collection = db.collection(collection_name)
+    batch = db.batch()
+    count = 0
+    batch_count = 0
+
+    for item in items:
+        url = item.get("url")
+        category = item.get("category")
+
+        if not url or not category:
+            continue
+
+        document_id = make_id(category, url)
+        document_ref = collection.document(document_id)
+
+        old_snapshot = document_ref.get()
+        old_data = old_snapshot.to_dict() if old_snapshot.exists else {}
+
+        first_seen = get_first_seen(old_data)
+
+        data = dict(item)
+        data["first_seen_at"] = first_seen
+        data["updated_at"] = firestore.SERVER_TIMESTAMP
+        data["fetched_at"] = firestore.SERVER_TIMESTAMP
+
+        batch.set(document_ref, data, merge=True)
+
+        count += 1
+        batch_count += 1
+
+        if batch_count >= BATCH_SIZE:
+            batch.commit()
+            batch = db.batch()
+            batch_count = 0
+
+    if batch_count:
+        batch.commit()
+
+    logging.info("%s uploaded: %s", collection_name, count)
+
+
+# =========================================================
+# AUTOMATIC DELETE
+# =========================================================
+
+def expiry_date_for_document(data, collection_name):
+    """
+    Return the date after which this document expires.
+    """
+
+    first_seen = firestore_datetime(data.get("first_seen_at"))
+
+    # For older documents that don't have first_seen_at,
+    # start their 30-day grace period from this cleanup run.
+    if not first_seen:
+        first_seen = NOW
+
+    if collection_name == "job_updates":
+        last_date = firestore_datetime(data.get("last_date"))
+
+        if last_date:
+            return last_date
+
+        return first_seen + timedelta(days=MAX_AGE_DAYS)
+
+    if collection_name == "news_updates":
+        published_at = firestore_datetime(data.get("published_at"))
+
+        if published_at:
+            return published_at + timedelta(days=MAX_AGE_DAYS)
+
+        return first_seen + timedelta(days=MAX_AGE_DAYS)
+
+    if collection_name == "exam_updates":
+        exam_date = (
+            firestore_datetime(data.get("exam_date"))
+            or firestore_datetime(data.get("event_date"))
+            or firestore_datetime(data.get("last_date"))
         )
 
-    if node is None:
-        return ""
+        if exam_date:
+            return exam_date
 
-    return clean_text("".join(node.itertext()))
+        return first_seen + timedelta(days=MAX_AGE_DAYS)
+
+    if collection_name == "board_updates":
+        published_at = firestore_datetime(data.get("published_at"))
+
+        if published_at:
+            return published_at + timedelta(days=MAX_AGE_DAYS)
+
+        return first_seen + timedelta(days=MAX_AGE_DAYS)
+
+    return None
 
 
-def get_news_updates(session, source_status):
-    updates = []
+def delete_expired_documents(db):
+    """
+    Delete expired documents only.
+    This does NOT delete documents merely because a website
+    failed or an item was missing from the latest scrape.
+    """
+    collections = [
+        "job_updates",
+        "exam_updates",
+        "news_updates",
+        "board_updates"
+    ]
 
-    cutoff = (
-        datetime.now(timezone.utc)
-        - timedelta(days=30)
-    )
+    total_deleted = 0
 
-    for category, sources in NEWS_RSS_SOURCES.items():
-        for publisher, feed_url in sources:
-            try:
-                response = session.get(
-                    feed_url,
-                    timeout=TIMEOUT
-                )
-                response.raise_for_status()
+    for collection_name in collections:
+        logging.info("Checking expired documents: %s", collection_name)
 
-                root = ET.fromstring(response.content)
+        collection = db.collection(collection_name)
+        snapshots = collection.stream()
 
-                entries = [
-                    node for node in root.iter()
-                    if node.tag.split("}")[-1] in ("item", "entry")
-                ]
+        batch = db.batch()
+        batch_count = 0
+        deleted_here = 0
 
-                found = 0
+        for snapshot in snapshots:
+            data = snapshot.to_dict() or {}
 
-                for entry in entries:
-                    title = rss_text(entry, "title")
-                    link = rss_text(entry, "link")
+            expiry = expiry_date_for_document(data, collection_name)
 
-                    if not link:
-                        link_node = next(
-                            (
-                                x for x in entry
-                                if x.tag.split("}")[-1] == "link"
-                            ),
-                            None
-                        )
-
-                        if link_node is not None:
-                            link = link_node.attrib.get("href", "")
-
-                    link = link.strip()
-
-                    if not title or not link:
-                        continue
-
-                    full_url = urljoin(feed_url, link)
-
-                    if not valid_url(full_url):
-                        continue
-
-                    date_value = (
-                        rss_text(entry, "pubDate")
-                        or rss_text(entry, "published")
-                        or rss_text(entry, "updated")
+            if not expiry or expiry > NOW:
+                # Add first_seen_at to old records so their
+                # 30-day grace period does not restart next run.
+                if not data.get("first_seen_at"):
+                    batch.set(
+                        snapshot.reference,
+                        {"first_seen_at": NOW},
+                        merge=True
                     )
+                    batch_count += 1
 
-                    published = parse_rss_date(date_value)
+                if batch_count >= BATCH_SIZE:
+                    batch.commit()
+                    batch = db.batch()
+                    batch_count = 0
 
-                    if published is None or published < cutoff:
-                        continue
+                continue
 
-                    description = (
-                        rss_text(entry, "description")
-                        or rss_text(entry, "summary")
-                        or title
-                    )
+            batch.delete(snapshot.reference)
+            batch_count += 1
+            deleted_here += 1
 
-                    updates.append({
-                        "category": category,
-                        "title": title,
-                        "url": full_url,
-                        "source": publisher,
-                        "description": description[:1200],
-                        "published_at": published.isoformat(),
-                        "date_status": "verified_from_rss",
-                        "checked_at": now_utc()
-                    })
+            if batch_count >= BATCH_SIZE:
+                batch.commit()
+                batch = db.batch()
+                batch_count = 0
 
-                    found += 1
+        if batch_count:
+            batch.commit()
 
-                source_status.append({
-                    "type": "news_rss",
-                    "category": category,
-                    "source": feed_url,
-                    "status": "success",
-                    "links_found": found
-                })
+        total_deleted += deleted_here
+        logging.info(
+            "%s deleted from %s",
+            deleted_here,
+            collection_name
+        )
 
-                print(f"NEWS RSS: {publisher} | Found: {found}")
-
-            except Exception as error:
-                source_status.append({
-                    "type": "news_rss",
-                    "category": category,
-                    "source": feed_url,
-                    "status": "error",
-                    "error": str(error)[:500]
-                })
-
-                print("NEWS RSS ERROR:", feed_url, error)
-
-    for category, urls in NEWS_WEB_SOURCES.items():
-        for page_url in urls:
-            try:
-                links = scrape_page(session, page_url)
-                found = 0
-
-                for item in links:
-                    if not matches_keyword(
-                        item["title"],
-                        NEWS_KEYWORDS
-                    ):
-                        continue
-
-                    updates.append({
-                        "category": category,
-                        "title": item["title"],
-                        "url": item["url"],
-                        "source": page_url,
-                        "description": item["title"],
-                        "published_at": "",
-                        "date_status": "unverified",
-                        "checked_at": now_utc()
-                    })
-
-                    found += 1
-
-                source_status.append({
-                    "type": "news_official",
-                    "category": category,
-                    "source": page_url,
-                    "status": "success",
-                    "links_found": found
-                })
-
-                print(f"OFFICIAL NEWS: {category} | Found: {found}")
-
-            except Exception as error:
-                source_status.append({
-                    "type": "news_official",
-                    "category": category,
-                    "source": page_url,
-                    "status": "error",
-                    "error": str(error)[:500]
-                })
-
-                print("OFFICIAL NEWS ERROR:", page_url, error)
-
-    return unique_by_url_and_category(updates)
+    logging.info("Total expired documents deleted: %s", total_deleted)
 
 
-# ==================================================
-# 9. FETCH ALL UPDATES AND CREATE JSON
-# ==================================================
+# =========================================================
+# MAIN
+# =========================================================
 
-def get_updates():
-    session = requests.Session()
-    session.headers.update(HEADERS)
+def main():
+    logging.info("Bihar EduAlert update checker started")
 
-    source_status = []
+    source_status = {}
 
-    board_updates = get_board_updates(session, source_status)
+    board_updates = get_board_updates(source_status)
 
     job_updates, exam_updates = get_job_and_exam_updates(
-        session,
         source_status
     )
 
-    news_updates = get_news_updates(session, source_status)
+    news_updates = get_news_updates(source_status)
 
-    result = {
-        "checked_at": now_utc(),
-        "total_updates": (
-            len(board_updates)
-            + len(job_updates)
-            + len(exam_updates)
-            + len(news_updates)
-        ),
-        "source_status": source_status,
-        "updates": board_updates,
+    board_updates = unique_updates(board_updates)
+    job_updates = unique_updates(job_updates)
+    exam_updates = unique_updates(exam_updates)
+    news_updates = unique_updates(news_updates)
+
+    all_updates = (
+        board_updates
+        + job_updates
+        + exam_updates
+        + news_updates
+    )
+
+    output = {
+        "checked_at": NOW.isoformat(),
+        "total_updates": len(all_updates),
         "board_updates": board_updates,
         "job_updates": job_updates,
         "exam_updates": exam_updates,
-        "news_updates": news_updates
+        "news_updates": news_updates,
+        "source_status": source_status,
+        "updates": all_updates
     }
 
     with open("updates.json", "w", encoding="utf-8") as file:
         json.dump(
-            result,
+            output,
             file,
             ensure_ascii=False,
             indent=2
         )
 
-    print("\n========== SUMMARY ==========")
-    print("BOARD UPDATES:", len(board_updates))
-    print("JOB UPDATES:", len(job_updates))
-    print("EXAM UPDATES:", len(exam_updates))
-    print("NEWS UPDATES:", len(news_updates))
-    print("TOTAL:", result["total_updates"])
-    print("=============================\n")
+    logging.info("JSON created: updates.json")
+    logging.info("Board updates: %s", len(board_updates))
+    logging.info("Job updates: %s", len(job_updates))
+    logging.info("Exam updates: %s", len(exam_updates))
+    logging.info("News updates: %s", len(news_updates))
 
-    return result
-
-
-# ==================================================
-# 10. FIREBASE CONNECTION
-# ==================================================
-
-def connect_firebase():
-    secret_value = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
-
-    if not secret_value:
-        raise RuntimeError(
-            "FIREBASE_SERVICE_ACCOUNT GitHub Secret nahi mila."
-        )
-
-    service_account_info = json.loads(secret_value)
-
-    if not firebase_admin._apps:
-        cred = credentials.Certificate(service_account_info)
-        firebase_admin.initialize_app(cred)
-
-    return firestore.client()
-
-
-# ==================================================
-# 11. FIREBASE BATCH UPLOAD
-# ==================================================
-
-def create_document_id(collection_name, item):
-    url = item.get("url", "").strip().rstrip("/")
-
-    if collection_name in ("job_updates", "exam_updates"):
-        category = item.get("category", "").strip()
-        unique_value = category.casefold() + "|" + url.casefold()
-
-    elif collection_name == "board_updates":
-        board = item.get("board", "").strip()
-        unique_value = board.casefold() + "|" + url.casefold()
-
-    else:
-        category = item.get("category", "").strip()
-        unique_value = category.casefold() + "|" + url.casefold()
-
-    return hashlib.sha256(
-        unique_value.encode("utf-8")
-    ).hexdigest()
-
-
-def upload_collection(db, collection_name, items):
-    if not items:
-        print(f"No items found for {collection_name}")
-        return 0
-
-    collection = db.collection(collection_name)
-    batch = db.batch()
-    count = 0
-    total = 0
-
-    for item in items:
-        document_id = create_document_id(collection_name, item)
-        document = collection.document(document_id)
-
-        data = dict(item)
-        data["updated_at"] = firestore.SERVER_TIMESTAMP
-        data["fetched_at"] = firestore.SERVER_TIMESTAMP
-
-        batch.set(document, data, merge=True)
-
-        count += 1
-        total += 1
-
-        if count >= 400:
-            batch.commit()
-            batch = db.batch()
-            count = 0
-
-    if count > 0:
-        batch.commit()
-
-    print(
-        f"Firebase upload successful: "
-        f"{collection_name} = {total}"
-    )
-
-    return total
-
-
-# ==================================================
-# 12. UPLOAD ALL COLLECTIONS
-# ==================================================
-
-def upload_to_firebase(result):
     db = connect_firebase()
 
-    upload_collection(db, "board_updates", result["board_updates"])
-    upload_collection(db, "job_updates", result["job_updates"])
-    upload_collection(db, "exam_updates", result["exam_updates"])
-    upload_collection(db, "news_updates", result["news_updates"])
+    if db:
+        try:
+            upload_collection(db, "board_updates", board_updates)
+            upload_collection(db, "job_updates", job_updates)
+            upload_collection(db, "exam_updates", exam_updates)
+            upload_collection(db, "news_updates", news_updates)
 
-    print("\nALL FIREBASE UPLOADS COMPLETED\n")
+            # Run expiry cleanup after uploads.
+            delete_expired_documents(db)
 
+            logging.info("Firebase upload and cleanup completed.")
 
-# ==================================================
-# 13. MAIN
-# ==================================================
+        except Exception as error:
+            logging.exception(
+                "Firebase upload/cleanup failed: %s",
+                error
+            )
+            raise
+
+    logging.info("Bihar EduAlert update checker finished.")
+
 
 if __name__ == "__main__":
-    result = get_updates()
-    upload_to_firebase(result)
+    main()
