@@ -8,7 +8,10 @@ import xml.etree.ElementTree as ET
 
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import urljoin, urlparse, urldefrag
+from urllib.parse import (
+    urljoin, urlparse, urldefrag,
+    parse_qsl, urlencode, urlunparse
+)
 
 import requests
 from bs4 import BeautifulSoup
@@ -32,6 +35,7 @@ REQUEST_TIMEOUT = 20
 MAX_AGE_DAYS = 45
 MAX_LINKS_PER_SOURCE = 100
 MAX_DETAIL_PAGES_PER_SOURCE = 20
+MAX_RSS_ENTRIES = 100
 
 OUTPUT_FILE = "updates.json"
 
@@ -58,9 +62,15 @@ logging.basicConfig(
 session = requests.Session()
 session.headers.update(HEADERS)
 
+TRACKING_PARAMETERS = {
+    "fbclid", "gclid", "mc_cid", "mc_eid",
+    "utm_source", "utm_medium", "utm_campaign",
+    "utm_term", "utm_content",
+}
+
 
 # =========================================================
-# SOURCES
+# OFFICIAL SOURCES
 # =========================================================
 
 BOARD_SOURCES = [
@@ -167,10 +177,10 @@ RSS_SOURCES = [
 JOB_KEYWORDS = [
     "recruitment", "vacancy", "job", "online apply",
     "application form", "notification", "admit card",
-    "result", "answer key", "selection", "भर्ती",
-    "नियुक्ति", "रिक्ति", "वैकेंसी", "आवेदन",
-    "प्रवेश पत्र", "एडमिट कार्ड", "रिजल्ट",
-    "उत्तर कुंजी", "चयन सूची",
+    "result", "answer key", "selection",
+    "भर्ती", "नियुक्ति", "रिक्ति", "वैकेंसी",
+    "आवेदन", "प्रवेश पत्र", "एडमिट कार्ड",
+    "रिजल्ट", "उत्तर कुंजी", "चयन सूची",
 ]
 
 EXAM_KEYWORDS = [
@@ -214,12 +224,8 @@ CATEGORY_KEYWORDS = {
     "BPSC": [
         "bpsc", "बिहार लोक सेवा",
     ],
-    "BSSC": [
-        "bssc",
-    ],
-    "BTSC": [
-        "btsc",
-    ],
+    "BSSC": ["bssc"],
+    "BTSC": ["btsc"],
     "Teacher": [
         "teacher", "tet", "ctet", "stet",
         "शिक्षक", "अध्यापक",
@@ -240,8 +246,31 @@ BAD_TITLES = {
     "logout", "register", "contact us",
     "about us", "privacy policy",
     "terms and conditions", "sitemap",
-    "skip to main content",
+    "skip to main content", "click here",
+    "read more", "latest news",
 }
+
+DEADLINE_LABELS = [
+    "last date to apply",
+    "application last date",
+    "closing date",
+    "last date",
+    "apply before",
+    "अंतिम तिथि",
+    "अंतिम तारीख",
+    "आवेदन की अंतिम तिथि",
+    "आवेदन की अंतिम तारीख",
+]
+
+PUBLISHED_LABELS = [
+    "published on",
+    "date of publication",
+    "release date",
+    "published",
+    "जारी तिथि",
+    "प्रकाशित",
+    "दिनांक",
+]
 
 
 # =========================================================
@@ -280,17 +309,33 @@ def normalize_url(url, base_url=None):
     url, _ = urldefrag(url)
     parsed = urlparse(url)
 
-    if parsed.scheme not in ("http", "https"):
+    if parsed.scheme.lower() not in ("http", "https"):
         return ""
 
     if not parsed.netloc:
         return ""
 
-    return url
+    query = [
+        (key, value)
+        for key, value in parse_qsl(
+            parsed.query,
+            keep_blank_values=True
+        )
+        if key.lower() not in TRACKING_PARAMETERS
+    ]
+
+    parsed = parsed._replace(
+        scheme=parsed.scheme.lower(),
+        netloc=parsed.netloc.lower(),
+        query=urlencode(query, doseq=True),
+        fragment="",
+    )
+
+    return urlunparse(parsed)
 
 
 def make_id(url, title=""):
-    raw = (url or "").strip().lower()
+    raw = normalize_url(url).lower()
 
     return hashlib.sha256(
         raw.encode("utf-8", errors="ignore")
@@ -312,7 +357,7 @@ def valid_title(title):
     if len(title) < 12:
         return False
 
-    if title.lower().strip(" .:-") in BAD_TITLES:
+    if title.lower().strip(" .:-|") in BAD_TITLES:
         return False
 
     if len(title.split()) == 1 and title.isupper():
@@ -321,39 +366,110 @@ def valid_title(title):
     return True
 
 
+def get_source_domain(url):
+    try:
+        return urlparse(url).netloc.lower()
+    except Exception:
+        return ""
+
+
 # =========================================================
-# DATE HELPERS
+# DATE PARSING
 # =========================================================
 
-def parse_date(text):
+def parse_date(value):
+    if not value:
+        return None
+
+    text = clean_text(value)
+
     if not text:
         return None
 
-    text = clean_text(text)
+    # RSS date format
+    try:
+        parsed = parsedate_to_datetime(text)
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(
+                tzinfo=timezone.utc
+            )
+
+        return parsed.astimezone(timezone.utc)
+
+    except Exception:
+        pass
+
+    # ISO date/time
+    try:
+        parsed = datetime.fromisoformat(
+            text.replace("Z", "+00:00")
+        )
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(
+                tzinfo=timezone.utc
+            )
+
+        return parsed.astimezone(timezone.utc)
+
+    except Exception:
+        pass
 
     patterns = [
-        r"\b(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})\b",
-        r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b",
+        (
+            r"(?<!\d)(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})(?!\d)",
+            "dmy"
+        ),
+        (
+            r"(?<!\d)(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)",
+            "ymd"
+        ),
     ]
 
-    for pattern in patterns:
+    for pattern, order in patterns:
         match = re.search(pattern, text)
 
         if not match:
             continue
 
         try:
-            values = match.groups()
+            first, second, third = map(
+                int,
+                match.groups()
+            )
 
-            if len(values[0]) == 4:
-                year, month, day = map(int, values)
+            if order == "dmy":
+                day, month, year = first, second, third
             else:
-                day, month, year = map(int, values)
+                year, month, day = first, second, third
 
             return datetime(
-                year, month, day,
+                year,
+                month,
+                day,
                 tzinfo=timezone.utc
             )
+
+        except ValueError:
+            continue
+
+    # Textual month dates
+    formats = [
+        "%d %B %Y",
+        "%d %b %Y",
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%d-%b-%Y",
+        "%d-%B-%Y",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(
+                text,
+                fmt
+            ).replace(tzinfo=timezone.utc)
 
         except ValueError:
             continue
@@ -364,12 +480,18 @@ def parse_date(text):
 def find_date_near_labels(text, labels):
     text = clean_text(text)
 
+    date_pattern = (
+        r"(\d{1,2}[-/.]\d{1,2}[-/.]20\d{2}"
+        r"|20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}"
+        r"|\d{1,2}\s+[A-Za-z]{3,9}\s+20\d{2}"
+        r"|[A-Za-z]{3,9}\s+\d{1,2},?\s+20\d{2})"
+    )
+
     for label in labels:
         pattern = (
             re.escape(label)
-            + r"[\s:：\-]{0,30}"
-            + r"(\d{1,2}[-/.]\d{1,2}[-/.]20\d{2}"
-            + r"|20\d{2}[-/.]\d{1,2}[-/.]\d{1,2})"
+            + r"[\s:：\-]{0,40}"
+            + date_pattern
         )
 
         match = re.search(
@@ -379,48 +501,45 @@ def find_date_near_labels(text, labels):
         )
 
         if match:
-            return parse_date(match.group(1))
+            parsed = parse_date(match.group(1))
+
+            if parsed:
+                return parsed
 
     return None
 
 
 def find_deadline(text):
-    labels = [
-        "last date",
-        "closing date",
-        "apply before",
-        "application last date",
-        "last date to apply",
-        "अंतिम तिथि",
-        "अंतिम तारीख",
-        "आवेदन की अंतिम तिथि",
-        "आवेदन की अंतिम तारीख",
-    ]
-
-    return find_date_near_labels(text, labels)
+    return find_date_near_labels(
+        text,
+        DEADLINE_LABELS
+    )
 
 
 def find_published_date(text):
-    labels = [
-        "published on",
-        "date of publication",
-        "release date",
-        "जारी तिथि",
-        "प्रकाशित",
-        "दिनांक",
-    ]
-
-    return find_date_near_labels(text, labels)
+    return find_date_near_labels(
+        text,
+        PUBLISHED_LABELS
+    )
 
 
 def is_recent(date_value):
     if not date_value:
         return True
 
-    age = utc_now() - date_value
+    if date_value.tzinfo is None:
+        date_value = date_value.replace(
+            tzinfo=timezone.utc
+        )
 
-    return timedelta(0) <= age <= timedelta(
-        days=MAX_AGE_DAYS
+    age = utc_now() - date_value.astimezone(
+        timezone.utc
+    )
+
+    return (
+        timedelta(0)
+        <= age
+        <= timedelta(days=MAX_AGE_DAYS)
     )
 
 
@@ -428,9 +547,19 @@ def is_recent(date_value):
 # CLASSIFICATION
 # =========================================================
 
-def classify_update(title, description, source_type, source_category):
+def classify_update(
+    title,
+    description,
+    source_type,
+    source_category
+):
     title_text = clean_text(title).lower()
-    full_text = (title_text + " " + clean_text(description).lower())
+
+    full_text = (
+        title_text
+        + " "
+        + clean_text(description).lower()
+    )
 
     if source_type == "board":
         return "board"
@@ -438,21 +567,32 @@ def classify_update(title, description, source_type, source_category):
     if source_type == "news":
         return "news"
 
-    # Job website pages should not become board updates
-    # just because their description mentions school/exam.
-    if contains_keyword(title_text, EXAM_KEYWORDS):
+    title_is_exam = contains_keyword(
+        title_text,
+        EXAM_KEYWORDS
+    )
+
+    title_is_job = contains_keyword(
+        title_text,
+        JOB_KEYWORDS
+    )
+
+    if title_is_job and not title_is_exam:
+        return "job"
+
+    if title_is_exam:
         return "exam"
 
-    if contains_keyword(title_text, JOB_KEYWORDS):
+    if title_is_job:
         return "job"
 
     if source_type == "job":
         return "job"
 
-    if source_category in ("Bihar News", "Education News"):
-        return "news"
-
-    if contains_keyword(full_text, EXAM_KEYWORDS):
+    if contains_keyword(
+        full_text,
+        EXAM_KEYWORDS
+    ):
         return "exam"
 
     return "other"
@@ -461,23 +601,28 @@ def classify_update(title, description, source_type, source_category):
 def infer_category(title, source_category=""):
     text = clean_text(title).lower()
 
-    # Match specific job category from title only.
-    # Do not classify from the entire article description.
-    for category, keywords in CATEGORY_KEYWORDS.items():
-        if contains_keyword(text, keywords):
+    ordered_categories = [
+        "Police",
+        "Army",
+        "Railway",
+        "Bank",
+        "SSC",
+        "BPSC",
+        "BSSC",
+        "BTSC",
+        "Teacher",
+        "Defence",
+        "Central Government",
+    ]
+
+    for category in ordered_categories:
+        if contains_keyword(
+            text,
+            CATEGORY_KEYWORDS[category]
+        ):
             return category
 
-    if source_category:
-        return source_category
-
-    return "General"
-
-
-def get_source_domain(url):
-    try:
-        return urlparse(url).netloc.lower()
-    except Exception:
-        return ""
+    return source_category or "General"
 
 
 # =========================================================
@@ -501,14 +646,6 @@ def make_update(
     if not valid_title(title) or not url:
         return None
 
-    if not update_type:
-        update_type = classify_update(
-            title,
-            description,
-            "",
-            source_category
-        )
-
     category = infer_category(
         title,
         source_category
@@ -527,7 +664,7 @@ def make_update(
         "url": url,
         "source": source_name,
         "category": category,
-        "type": update_type,
+        "type": update_type or "other",
         "published_at": (
             published_at.isoformat()
             if published_at else None
@@ -554,6 +691,7 @@ def get_page(url):
         )
 
         response.raise_for_status()
+
         return response
 
     except requests.RequestException as error:
@@ -598,7 +736,10 @@ def extract_links(url, soup):
     if soup is None:
         return results
 
-    for anchor in soup.find_all("a", href=True):
+    for anchor in soup.find_all(
+        "a",
+        href=True
+    ):
         href = normalize_url(
             anchor.get("href"),
             url
@@ -618,6 +759,14 @@ def extract_links(url, soup):
                 anchor.get("title", "")
             )
 
+        if not title:
+            image = anchor.find("img", alt=True)
+
+            if image:
+                title = clean_text(
+                    image.get("alt", "")
+                )
+
         if not valid_title(title):
             continue
 
@@ -634,8 +783,9 @@ def extract_links(url, soup):
 
 def is_useful_link(title, url, source_category=""):
     text = (
-        clean_text(title) + " " +
-        (url or "")
+        clean_text(title)
+        + " "
+        + (url or "")
     ).lower()
 
     bad_words = [
@@ -648,12 +798,13 @@ def is_useful_link(title, url, source_category=""):
     if contains_keyword(text, bad_words):
         return False
 
-    # News feeds can have titles without job keywords.
     if source_category == "Bihar News":
         return valid_title(title)
 
-    # Board pages: keep only links related to board/exam notices.
-    if source_category in ("Bihar Board", "CBSE Board"):
+    if source_category in (
+        "Bihar Board",
+        "CBSE Board"
+    ):
         return contains_keyword(
             text,
             BOARD_KEYWORDS + EXAM_KEYWORDS
@@ -669,21 +820,81 @@ def is_useful_link(title, url, source_category=""):
 # DETAIL PAGE EXTRACTION
 # =========================================================
 
+def get_meta_content(soup, keys):
+    for key in keys:
+        meta = (
+            soup.find(
+                "meta",
+                attrs={"property": key}
+            )
+            or soup.find(
+                "meta",
+                attrs={"name": key}
+            )
+            or soup.find(
+                "meta",
+                attrs={"itemprop": key}
+            )
+        )
+
+        if meta and meta.get("content"):
+            value = clean_text(
+                meta.get("content")
+            )
+
+            if value:
+                return value
+
+    return ""
+
+
 def extract_detail(url):
     soup = get_soup(url)
 
     if soup is None:
         return "", None, None, ""
 
+    # Read metadata before removing page elements.
+    published_meta = get_meta_content(
+        soup,
+        [
+            "article:published_time",
+            "datePublished",
+            "date",
+            "pubdate",
+            "publishdate",
+        ]
+    )
+
+    modified_meta = get_meta_content(
+        soup,
+        [
+            "article:modified_time",
+            "dateModified",
+        ]
+    )
+
+    meta_description = get_meta_content(
+        soup,
+        [
+            "description",
+            "og:description",
+            "twitter:description",
+        ]
+    )
+
     for element in soup([
-        "script", "style", "nav",
-        "footer", "header", "noscript"
+        "script",
+        "style",
+        "nav",
+        "footer",
+        "header",
+        "noscript"
     ]):
         element.decompose()
 
     title = ""
 
-    # Prefer H1, then OpenGraph title, then page title.
     h1 = soup.find("h1")
 
     if h1:
@@ -692,15 +903,10 @@ def extract_detail(url):
         )
 
     if not title:
-        meta = soup.find(
-            "meta",
-            attrs={"property": "og:title"}
+        title = get_meta_content(
+            soup,
+            ["og:title", "twitter:title"]
         )
-
-        if meta:
-            title = clean_text(
-                meta.get("content", "")
-            )
 
     if not title and soup.title:
         title = clean_text(
@@ -732,31 +938,27 @@ def extract_detail(url):
                 body.get_text(" ", strip=True)
             )
 
+    if not description:
+        description = meta_description
+
     description = description[:12000]
 
-    # Search visible article text and metadata for dates.
-    date_text = description
+    published_at = (
+        parse_date(published_meta)
+        or find_published_date(description)
+    )
 
-    for meta_name in [
-        "article:published_time",
-        "date",
-        "pubdate",
-    ]:
-        meta = soup.find(
-            "meta",
-            attrs={"property": meta_name}
-        ) or soup.find(
-            "meta",
-            attrs={"name": meta_name}
-        )
+    last_date = find_deadline(description)
 
-        if meta:
-            date_text += " " + meta.get("content", "")
+    if not published_at and modified_meta:
+        published_at = parse_date(modified_meta)
 
-    published_at = find_published_date(date_text)
-    last_date = find_deadline(date_text)
-
-    return description, published_at, last_date, title
+    return (
+        description,
+        published_at,
+        last_date,
+        title
+    )
 
 
 # =========================================================
@@ -770,14 +972,20 @@ def scrape_html_source(source, source_type):
     source_category = source.get("category", "")
 
     for base_url in source.get("urls", []):
-        logging.info("Checking %s", base_url)
+        logging.info(
+            "Checking %s",
+            base_url
+        )
 
         soup = get_soup(base_url)
 
         if soup is None:
             continue
 
-        links = extract_links(base_url, soup)
+        links = extract_links(
+            base_url,
+            soup
+        )
 
         logging.info(
             "%s links found: %s",
@@ -795,7 +1003,9 @@ def scrape_html_source(source, source_type):
             ):
                 candidates.append(link)
 
-        candidates = candidates[:MAX_DETAIL_PAGES_PER_SOURCE]
+        candidates = candidates[
+            :MAX_DETAIL_PAGES_PER_SOURCE
+        ]
 
         for link in candidates:
             (
@@ -803,7 +1013,9 @@ def scrape_html_source(source, source_type):
                 published_at,
                 last_date,
                 detail_title
-            ) = extract_detail(link["url"])
+            ) = extract_detail(
+                link["url"]
+            )
 
             title = (
                 detail_title
@@ -824,9 +1036,9 @@ def scrape_html_source(source, source_type):
                 source_category
             )
 
-            date_for_age = published_at or last_date
-
-            if date_for_age and not is_recent(date_for_age):
+            # Only publication date controls the age filter.
+            # A deadline is not a publication date.
+            if published_at and not is_recent(published_at):
                 continue
 
             item = make_update(
@@ -866,7 +1078,10 @@ def xml_local_name(tag):
 
 
 def xml_child_text(element, names):
-    names = [name.lower() for name in names]
+    names = [
+        name.lower()
+        for name in names
+    ]
 
     for child in element.iter():
         if xml_local_name(child.tag) in names:
@@ -886,8 +1101,15 @@ def xml_entry_link(entry, feed_url):
             continue
 
         href = child.attrib.get("href", "")
-        rel = child.attrib.get("rel", "alternate")
-        link_type = child.attrib.get("type", "")
+        rel = child.attrib.get(
+            "rel",
+            "alternate"
+        )
+
+        link_type = child.attrib.get(
+            "type",
+            ""
+        )
 
         if not href:
             continue
@@ -898,7 +1120,10 @@ def xml_entry_link(entry, feed_url):
         if link_type and "html" not in link_type.lower():
             continue
 
-        return normalize_url(href, feed_url)
+        return normalize_url(
+            href,
+            feed_url
+        )
 
     for child in entry:
         if xml_local_name(child.tag) == "link":
@@ -907,41 +1132,19 @@ def xml_entry_link(entry, feed_url):
             )
 
             if value.startswith("http"):
-                return normalize_url(value, feed_url)
+                return normalize_url(
+                    value,
+                    feed_url
+                )
 
     return ""
 
 
 def parse_xml_date(text):
-    if not text:
-        return None
+    return parse_date(text)
 
-    text = clean_text(text)
 
-    try:
-        value = parsedate_to_datetime(text)
-
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-
-        return value.astimezone(timezone.utc)
-
-    except Exception:
-        pass
-
-    try:
-        value = datetime.fromisoformat(
-            text.replace("Z", "+00:00")
-        )
-
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-
-        return value.astimezone(timezone.utc)
-
-    except Exception:
-        return parse_date(text)
-        # =========================================================
+# =========================================================
 # RSS / ATOM SCRAPER
 # =========================================================
 
@@ -950,12 +1153,16 @@ def scrape_rss_source(source):
 
     feed_url = source["url"]
     source_name = source["name"]
+
     source_category = source.get(
         "category",
         "Bihar News"
     )
 
-    logging.info("Checking RSS: %s", feed_url)
+    logging.info(
+        "Checking RSS: %s",
+        feed_url
+    )
 
     response = get_page(feed_url)
 
@@ -963,7 +1170,9 @@ def scrape_rss_source(source):
         return updates
 
     try:
-        root = ET.fromstring(response.content)
+        root = ET.fromstring(
+            response.content
+        )
 
     except ET.ParseError as error:
         logging.warning(
@@ -971,30 +1180,52 @@ def scrape_rss_source(source):
             feed_url,
             error
         )
+
         return updates
 
     entries = []
 
     for element in root.iter():
-        if xml_local_name(element.tag) in ("item", "entry"):
+        if xml_local_name(element.tag) in (
+            "item",
+            "entry"
+        ):
             entries.append(element)
 
-    for entry in entries[:100]:
-        title = xml_child_text(entry, ["title"])
+    for entry in entries[:MAX_RSS_ENTRIES]:
+        title = xml_child_text(
+            entry,
+            ["title"]
+        )
 
         description = xml_child_text(
             entry,
-            ["description", "summary", "encoded", "content"]
+            [
+                "description",
+                "summary",
+                "encoded",
+                "content"
+            ]
         )
 
-        url = xml_entry_link(entry, feed_url)
+        url = xml_entry_link(
+            entry,
+            feed_url
+        )
 
         date_text = xml_child_text(
             entry,
-            ["pubdate", "published", "updated", "date"]
+            [
+                "pubdate",
+                "published",
+                "updated",
+                "date"
+            ]
         )
 
-        published_at = parse_xml_date(date_text)
+        published_at = parse_xml_date(
+            date_text
+        )
 
         if not title or not url:
             continue
@@ -1032,62 +1263,6 @@ def scrape_rss_source(source):
 
 
 # =========================================================
-# COLLECT ALL UPDATES
-# =========================================================
-
-def collect_all_updates():
-    all_updates = []
-
-    logging.info("=" * 55)
-    logging.info("Starting Bihar EduAlert update checker")
-    logging.info("=" * 55)
-
-    # Board updates
-    for source in BOARD_SOURCES:
-        try:
-            results = scrape_html_source(
-                source,
-                "board"
-            )
-            all_updates.extend(results)
-
-        except Exception:
-            logging.exception(
-                "Board source failed: %s",
-                source.get("name")
-            )
-
-    # Job and exam updates
-    for source in JOB_SOURCES:
-        try:
-            results = scrape_html_source(
-                source,
-                "job"
-            )
-            all_updates.extend(results)
-
-        except Exception:
-            logging.exception(
-                "Job source failed: %s",
-                source.get("name")
-            )
-
-    # News RSS updates
-    for source in RSS_SOURCES:
-        try:
-            results = scrape_rss_source(source)
-            all_updates.extend(results)
-
-        except Exception:
-            logging.exception(
-                "RSS source failed: %s",
-                source.get("name")
-            )
-
-    return remove_duplicates(all_updates)
-
-
-# =========================================================
 # REMOVE DUPLICATES
 # =========================================================
 
@@ -1099,22 +1274,28 @@ def remove_duplicates(items):
         if not item:
             continue
 
-        url = normalize_url(item.get("url", ""))
+        url = normalize_url(
+            item.get("url", "")
+        )
 
         if not url:
             continue
 
-        # Ignore URL fragments and trailing slash differences.
         parsed = urlparse(url)
+
         normalized_key = (
             parsed.netloc.lower()
             + parsed.path.rstrip("/").lower()
-            + ("?" + parsed.query if parsed.query else "")
+            + (
+                "?" + parsed.query
+                if parsed.query else ""
+            )
         )
 
         if normalized_key in seen_urls:
             continue
 
+        item["url"] = url
         item["id"] = make_id(url)
 
         unique[item["id"]] = item
@@ -1131,6 +1312,68 @@ def remove_duplicates(items):
 
 
 # =========================================================
+# COLLECT ALL UPDATES
+# =========================================================
+
+def collect_all_updates():
+    all_updates = []
+
+    logging.info("=" * 55)
+    logging.info(
+        "Starting Bihar EduAlert update checker"
+    )
+    logging.info("=" * 55)
+
+    for source in BOARD_SOURCES:
+        try:
+            results = scrape_html_source(
+                source,
+                "board"
+            )
+
+            all_updates.extend(results)
+
+        except Exception:
+            logging.exception(
+                "Board source failed: %s",
+                source.get("name")
+            )
+
+    for source in JOB_SOURCES:
+        try:
+            results = scrape_html_source(
+                source,
+                "job"
+            )
+
+            all_updates.extend(results)
+
+        except Exception:
+            logging.exception(
+                "Job source failed: %s",
+                source.get("name")
+            )
+
+    for source in RSS_SOURCES:
+        try:
+            results = scrape_rss_source(
+                source
+            )
+
+            all_updates.extend(results)
+
+        except Exception:
+            logging.exception(
+                "RSS source failed: %s",
+                source.get("name")
+            )
+
+    return remove_duplicates(
+        all_updates
+    )
+
+
+# =========================================================
 # GROUP UPDATES
 # =========================================================
 
@@ -1143,7 +1386,10 @@ def group_updates(items):
     }
 
     for item in items:
-        update_type = item.get("type", "other")
+        update_type = item.get(
+            "type",
+            "other"
+        )
 
         if update_type == "board":
             grouped["board_updates"].append(item)
@@ -1166,7 +1412,10 @@ def group_updates(items):
 
 def initialize_firebase():
     if firebase_admin is None:
-        logging.error("firebase-admin package is missing")
+        logging.error(
+            "firebase-admin package is missing"
+        )
+
         return None
 
     service_account_json = os.environ.get(
@@ -1177,6 +1426,7 @@ def initialize_firebase():
         logging.error(
             "FIREBASE_SERVICE_ACCOUNT secret not found"
         )
+
         return None
 
     try:
@@ -1189,12 +1439,17 @@ def initialize_firebase():
                 service_account_info
             )
 
-            firebase_admin.initialize_app(credential)
+            firebase_admin.initialize_app(
+                credential
+            )
 
         return firestore.client()
 
     except Exception:
-        logging.exception("Firebase initialization failed")
+        logging.exception(
+            "Firebase initialization failed"
+        )
+
         return None
 
 
@@ -1204,9 +1459,10 @@ def initialize_firebase():
 
 def upload_to_firestore(db, grouped):
     if db is None:
-        logging.warning(
-            "Firebase not connected. Skipping upload."
+        logging.error(
+            "Firebase database is not available"
         )
+
         return False
 
     total_uploaded = 0
@@ -1218,6 +1474,7 @@ def upload_to_firestore(db, grouped):
                 "%s: no updates",
                 collection_name
             )
+
             continue
 
         logging.info(
@@ -1229,30 +1486,33 @@ def upload_to_firestore(db, grouped):
         try:
             for start in range(0, len(items), 400):
                 batch_items = items[start:start + 400]
+
                 batch = db.batch()
+                references = []
 
                 for item in batch_items:
-                    document_id = item["id"]
-
                     reference = db.collection(
                         collection_name
-                    ).document(document_id)
+                    ).document(
+                        item["id"]
+                    )
 
                     old_doc = reference.get()
 
                     old_data = (
                         old_doc.to_dict()
-                        if old_doc.exists else {}
+                        if old_doc.exists
+                        else {}
                     )
 
-                    first_seen_at = (
+                    data = dict(item)
+
+                    data["first_seen_at"] = (
                         old_data.get("first_seen_at")
                         or item.get("created_at")
                         or iso_now()
                     )
 
-                    data = dict(item)
-                    data["first_seen_at"] = first_seen_at
                     data["last_checked_at"] = iso_now()
                     data["active"] = True
 
@@ -1262,8 +1522,11 @@ def upload_to_firestore(db, grouped):
                         merge=True
                     )
 
+                    references.append(reference)
+
                 batch.commit()
-                total_uploaded += len(batch_items)
+
+                total_uploaded += len(references)
 
             logging.info(
                 "Uploaded successfully: %s",
@@ -1272,6 +1535,7 @@ def upload_to_firestore(db, grouped):
 
         except Exception:
             all_successful = False
+
             logging.exception(
                 "Firestore upload failed: %s",
                 collection_name
@@ -1294,11 +1558,14 @@ def save_json(items, grouped):
         "app": APP_NAME,
         "generated_at": iso_now(),
         "total_updates": len(items),
+
         "counts": {
             name: len(values)
             for name, values in grouped.items()
         },
+
         "updates": items,
+
         **grouped,
     }
 
@@ -1308,6 +1575,7 @@ def save_json(items, grouped):
             "w",
             encoding="utf-8"
         ) as file:
+
             json.dump(
                 output,
                 file,
@@ -1315,11 +1583,18 @@ def save_json(items, grouped):
                 indent=2
             )
 
-        logging.info("JSON saved: %s", OUTPUT_FILE)
+        logging.info(
+            "JSON saved: %s",
+            OUTPUT_FILE
+        )
+
         return True
 
     except Exception:
-        logging.exception("Could not save updates.json")
+        logging.exception(
+            "Could not save updates.json"
+        )
+
         return False
 
 
@@ -1331,14 +1606,18 @@ def main():
     start_time = time.time()
 
     logging.info("=" * 55)
-    logging.info("BIHAR EDU ALERT AUTOMATIC UPDATES")
+    logging.info(
+        "BIHAR EDU ALERT AUTOMATIC UPDATES"
+    )
     logging.info("=" * 55)
 
     # Step 1: Collect updates
     all_updates = collect_all_updates()
 
     # Step 2: Group updates
-    grouped = group_updates(all_updates)
+    grouped = group_updates(
+        all_updates
+    )
 
     # Step 3: Save JSON
     json_saved = save_json(
@@ -1357,8 +1636,11 @@ def main():
             db,
             grouped
         )
+
     else:
-        logging.error("Firebase upload skipped.")
+        logging.error(
+            "Firebase upload skipped"
+        )
 
     # Step 6: Summary
     elapsed = round(
@@ -1367,7 +1649,9 @@ def main():
     )
 
     logging.info("=" * 55)
-    logging.info("UPDATE CHECKER FINISHED")
+    logging.info(
+        "UPDATE CHECKER FINISHED"
+    )
     logging.info("=" * 55)
 
     logging.info(
@@ -1410,7 +1694,7 @@ def main():
         elapsed
     )
 
-    # Fail the GitHub Actions run if important output failed.
+    # Fail GitHub Actions if important output failed.
     if not json_saved or not firebase_success:
         raise RuntimeError(
             "JSON generation or Firebase upload failed."
