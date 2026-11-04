@@ -7,6 +7,7 @@ import logging
 import xml.etree.ElementTree as ET
 
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlparse, urldefrag
 
 import requests
@@ -82,124 +83,79 @@ BOARD_SOURCES = [
     },
 ]
 
-
 JOB_SOURCES = [
     {
         "name": "Bihar Police CSBC",
         "category": "Police",
-        "urls": [
-            "https://csbc.bihar.gov.in/",
-        ],
+        "urls": ["https://csbc.bihar.gov.in/"],
     },
     {
         "name": "Bihar Police BPSSC",
         "category": "Police",
-        "urls": [
-            "https://bpssc.bihar.gov.in/",
-        ],
+        "urls": ["https://bpssc.bihar.gov.in/"],
     },
     {
         "name": "BPSC",
         "category": "BPSC",
-        "urls": [
-            "https://bpsc.bihar.gov.in/",
-        ],
+        "urls": ["https://bpsc.bihar.gov.in/"],
     },
     {
         "name": "BSSC",
-        "category": "Teacher",
-        "urls": [
-            "https://bssc.bihar.gov.in/",
-        ],
+        "category": "BSSC",
+        "urls": ["https://bssc.bihar.gov.in/"],
     },
     {
         "name": "BTSC",
-        "category": "Teacher",
-        "urls": [
-            "https://btsc.bihar.gov.in/",
-        ],
+        "category": "BTSC",
+        "urls": ["https://btsc.bihar.gov.in/"],
     },
     {
         "name": "Railway",
         "category": "Railway",
-        "urls": [
-            "https://www.rrbcdg.gov.in/",
-        ],
+        "urls": ["https://www.rrbcdg.gov.in/"],
     },
     {
         "name": "SSC",
         "category": "SSC",
-        "urls": [
-            "https://ssc.gov.in/",
-        ],
+        "urls": ["https://ssc.gov.in/"],
     },
     {
         "name": "Indian Army",
         "category": "Army",
-        "urls": [
-            "https://joinindianarmy.nic.in/",
-        ],
+        "urls": ["https://joinindianarmy.nic.in/"],
     },
     {
         "name": "Indian Navy",
         "category": "Defence",
-        "urls": [
-            "https://www.joinindiannavy.gov.in/",
-        ],
+        "urls": ["https://www.joinindiannavy.gov.in/"],
     },
     {
         "name": "Indian Air Force",
         "category": "Defence",
-        "urls": [
-            "https://afcat.cdac.in/",
-        ],
+        "urls": ["https://afcat.cdac.in/"],
     },
     {
         "name": "India Post",
         "category": "Central Government",
-        "urls": [
-            "https://indiapost.gov.in/",
-        ],
+        "urls": ["https://indiapost.gov.in/"],
     },
 ]
-
 
 RSS_SOURCES = [
     {
         "name": "Amar Ujala Bihar News",
         "category": "Bihar News",
-        "url": (
-            "https://www.amarujala.com/rss/"
-            "bihar.xml"
-        ),
-        "type": "news",
+        "url": "https://www.amarujala.com/rss/bihar.xml",
     },
     {
         "name": "Prabhat Khabar Bihar",
         "category": "Bihar News",
-        "url": (
-            "https://www.prabhatkhabar.com/"
-            "feed"
-        ),
-        "type": "news",
+        "url": "https://www.prabhatkhabar.com/feed",
     },
     {
         "name": "Live Hindustan Bihar",
         "category": "Bihar News",
-        "url": (
-            "https://www.livehindustan.com/"
-            "feed"
-        ),
-        "type": "news",
-    },
-    {
-        "name": "Live Hindustan Education",
-        "category": "Education News",
-        "url": (
-            "https://www.livehindustan.com/"
-            "feed"
-        ),
-        "type": "education",
+        "url": "https://www.livehindustan.com/feed",
     },
 ]
 
@@ -214,7 +170,7 @@ JOB_KEYWORDS = [
     "result", "answer key", "selection", "भर्ती",
     "नियुक्ति", "रिक्ति", "वैकेंसी", "आवेदन",
     "प्रवेश पत्र", "एडमिट कार्ड", "रिजल्ट",
-    "परीक्षा", "उत्तर कुंजी", "चयन सूची",
+    "उत्तर कुंजी", "चयन सूची",
 ]
 
 EXAM_KEYWORDS = [
@@ -237,7 +193,7 @@ BOARD_KEYWORDS = [
 CATEGORY_KEYWORDS = {
     "Police": [
         "police", "constable", "daroga",
-        "sub inspector", "si", "सिपाही",
+        "sub inspector", "s.i.", "सिपाही",
         "पुलिस", "दरोगा",
     ],
     "Army": [
@@ -249,7 +205,8 @@ CATEGORY_KEYWORDS = {
         "रेलवे",
     ],
     "SSC": [
-        "ssc", "cgl", "chsl", "mts", "gd constable",
+        "ssc", "cgl", "chsl", "mts",
+        "gd constable",
     ],
     "Bank": [
         "bank", "ibps", "sbi", "rbi", "बैंक",
@@ -257,14 +214,33 @@ CATEGORY_KEYWORDS = {
     "BPSC": [
         "bpsc", "बिहार लोक सेवा",
     ],
+    "BSSC": [
+        "bssc",
+    ],
+    "BTSC": [
+        "btsc",
+    ],
     "Teacher": [
         "teacher", "tet", "ctet", "stet",
-        "शिक्षक", "अध्यापक", "bssc", "btsc",
+        "शिक्षक", "अध्यापक",
     ],
     "Defence": [
         "navy", "air force", "afcat",
         "coast guard", "defence", "रक्षा",
+        "नौसेना", "वायु सेना",
     ],
+    "Central Government": [
+        "india post", "post office", "postal",
+        "डाक विभाग",
+    ],
+}
+
+BAD_TITLES = {
+    "home", "english", "hindi", "login",
+    "logout", "register", "contact us",
+    "about us", "privacy policy",
+    "terms and conditions", "sitemap",
+    "skip to main content",
 }
 
 
@@ -296,13 +272,12 @@ def normalize_url(url, base_url=None):
     if not url:
         return ""
 
-    url = url.strip()
+    url = str(url).strip()
 
     if base_url:
         url = urljoin(base_url, url)
 
     url, _ = urldefrag(url)
-
     parsed = urlparse(url)
 
     if parsed.scheme not in ("http", "https"):
@@ -315,7 +290,8 @@ def normalize_url(url, base_url=None):
 
 
 def make_id(url, title=""):
-    raw = (url or "") + "|" + (title or "")
+    raw = (url or "").strip().lower()
+
     return hashlib.sha256(
         raw.encode("utf-8", errors="ignore")
     ).hexdigest()
@@ -329,6 +305,25 @@ def contains_keyword(text, keywords):
         for keyword in keywords
     )
 
+
+def valid_title(title):
+    title = clean_text(title)
+
+    if len(title) < 12:
+        return False
+
+    if title.lower().strip(" .:-") in BAD_TITLES:
+        return False
+
+    if len(title.split()) == 1 and title.isupper():
+        return False
+
+    return True
+
+
+# =========================================================
+# DATE HELPERS
+# =========================================================
 
 def parse_date(text):
     if not text:
@@ -422,38 +417,52 @@ def is_recent(date_value):
     if not date_value:
         return True
 
-    return (
-        utc_now() - date_value
-    ) <= timedelta(days=MAX_AGE_DAYS)
+    age = utc_now() - date_value
+
+    return timedelta(0) <= age <= timedelta(
+        days=MAX_AGE_DAYS
+    )
 
 
-def classify_update(title, description, source_category=""):
-    text = (
-        (title or "") + " " +
-        (description or "")
-    ).lower()
+# =========================================================
+# CLASSIFICATION
+# =========================================================
 
-    if contains_keyword(text, BOARD_KEYWORDS):
+def classify_update(title, description, source_type, source_category):
+    title_text = clean_text(title).lower()
+    full_text = (title_text + " " + clean_text(description).lower())
+
+    if source_type == "board":
         return "board"
 
-    if contains_keyword(text, EXAM_KEYWORDS):
+    if source_type == "news":
+        return "news"
+
+    # Job website pages should not become board updates
+    # just because their description mentions school/exam.
+    if contains_keyword(title_text, EXAM_KEYWORDS):
         return "exam"
 
-    if contains_keyword(text, JOB_KEYWORDS):
+    if contains_keyword(title_text, JOB_KEYWORDS):
+        return "job"
+
+    if source_type == "job":
         return "job"
 
     if source_category in ("Bihar News", "Education News"):
         return "news"
 
-    if source_category:
-        return "job"
+    if contains_keyword(full_text, EXAM_KEYWORDS):
+        return "exam"
 
     return "other"
 
 
-def infer_category(text, source_category=""):
-    text = (text or "").lower()
+def infer_category(title, source_category=""):
+    text = clean_text(title).lower()
 
+    # Match specific job category from title only.
+    # Do not classify from the entire article description.
     for category, keywords in CATEGORY_KEYWORDS.items():
         if contains_keyword(text, keywords):
             return category
@@ -471,6 +480,10 @@ def get_source_domain(url):
         return ""
 
 
+# =========================================================
+# CREATE UPDATE
+# =========================================================
+
 def make_update(
     title,
     description,
@@ -485,29 +498,30 @@ def make_update(
     description = clean_text(description)
     url = normalize_url(url)
 
-    if not title or not url:
-        return None
-
-    if len(title) < 5:
+    if not valid_title(title) or not url:
         return None
 
     if not update_type:
         update_type = classify_update(
             title,
             description,
+            "",
             source_category
         )
 
     category = infer_category(
-        title + " " + description,
+        title,
         source_category
     )
 
-    if update_type == "news":
+    if update_type == "board":
+        category = source_category or "Board"
+
+    elif update_type == "news":
         category = source_category or "Bihar News"
 
     return {
-        "id": make_id(url, title),
+        "id": make_id(url),
         "title": title[:300],
         "description": description[:3000],
         "url": url,
@@ -540,7 +554,6 @@ def get_page(url):
         )
 
         response.raise_for_status()
-
         return response
 
     except requests.RequestException as error:
@@ -564,6 +577,7 @@ def get_soup(url):
             response.text,
             "html.parser"
         )
+
     except Exception as error:
         logging.warning(
             "HTML parsing failed: %s",
@@ -604,10 +618,7 @@ def extract_links(url, soup):
                 anchor.get("title", "")
             )
 
-        if not title:
-            continue
-
-        if len(title) < 5:
+        if not valid_title(title):
             continue
 
         results.append({
@@ -623,13 +634,13 @@ def extract_links(url, soup):
 
 def is_useful_link(title, url, source_category=""):
     text = (
-        (title or "") + " " +
+        clean_text(title) + " " +
         (url or "")
     ).lower()
 
     bad_words = [
         "login", "logout", "register",
-        "privacy", "contact", "about us",
+        "privacy", "contact", "about-us",
         "facebook", "instagram", "youtube",
         "twitter", "whatsapp",
     ]
@@ -637,16 +648,21 @@ def is_useful_link(title, url, source_category=""):
     if contains_keyword(text, bad_words):
         return False
 
-    good_words = (
-        JOB_KEYWORDS +
-        EXAM_KEYWORDS +
-        BOARD_KEYWORDS
+    # News feeds can have titles without job keywords.
+    if source_category == "Bihar News":
+        return valid_title(title)
+
+    # Board pages: keep only links related to board/exam notices.
+    if source_category in ("Bihar Board", "CBSE Board"):
+        return contains_keyword(
+            text,
+            BOARD_KEYWORDS + EXAM_KEYWORDS
+        )
+
+    return contains_keyword(
+        text,
+        JOB_KEYWORDS + EXAM_KEYWORDS
     )
-
-    if source_category in ("Bihar News", "Education News"):
-        return len(title or "") >= 12
-
-    return contains_keyword(text, good_words)
 
 
 # =========================================================
@@ -657,7 +673,7 @@ def extract_detail(url):
     soup = get_soup(url)
 
     if soup is None:
-        return "", None, None
+        return "", None, None, ""
 
     for element in soup([
         "script", "style", "nav",
@@ -667,22 +683,29 @@ def extract_detail(url):
 
     title = ""
 
-    if soup.title:
+    # Prefer H1, then OpenGraph title, then page title.
+    h1 = soup.find("h1")
+
+    if h1:
+        title = clean_text(
+            h1.get_text(" ", strip=True)
+        )
+
+    if not title:
+        meta = soup.find(
+            "meta",
+            attrs={"property": "og:title"}
+        )
+
+        if meta:
+            title = clean_text(
+                meta.get("content", "")
+            )
+
+    if not title and soup.title:
         title = clean_text(
             soup.title.get_text(" ", strip=True)
         )
-
-    for tag in [
-        soup.find("h1"),
-        soup.find("h2"),
-    ]:
-        if tag:
-            candidate = clean_text(
-                tag.get_text(" ", strip=True)
-            )
-
-            if len(candidate) > len(title):
-                title = candidate
 
     description = ""
 
@@ -709,18 +732,31 @@ def extract_detail(url):
                 body.get_text(" ", strip=True)
             )
 
-    if len(description) > 12000:
-        description = description[:12000]
+    description = description[:12000]
 
-    published_at = find_published_date(
-        description
-    )
+    # Search visible article text and metadata for dates.
+    date_text = description
 
-    last_date = find_deadline(
-        description
-    )
+    for meta_name in [
+        "article:published_time",
+        "date",
+        "pubdate",
+    ]:
+        meta = soup.find(
+            "meta",
+            attrs={"property": meta_name}
+        ) or soup.find(
+            "meta",
+            attrs={"name": meta_name}
+        )
 
-    return description, published_at, last_date
+        if meta:
+            date_text += " " + meta.get("content", "")
+
+    published_at = find_published_date(date_text)
+    last_date = find_deadline(date_text)
+
+    return description, published_at, last_date, title
 
 
 # =========================================================
@@ -731,25 +767,17 @@ def scrape_html_source(source, source_type):
     updates = []
 
     source_name = source["name"]
-    source_category = source.get(
-        "category", ""
-    )
+    source_category = source.get("category", "")
 
     for base_url in source.get("urls", []):
-        logging.info(
-            "Checking %s",
-            base_url
-        )
+        logging.info("Checking %s", base_url)
 
         soup = get_soup(base_url)
 
         if soup is None:
             continue
 
-        links = extract_links(
-            base_url,
-            soup
-        )
+        links = extract_links(base_url, soup)
 
         logging.info(
             "%s links found: %s",
@@ -767,16 +795,24 @@ def scrape_html_source(source, source_type):
             ):
                 candidates.append(link)
 
-        candidates = candidates[
-            :MAX_DETAIL_PAGES_PER_SOURCE
-        ]
+        candidates = candidates[:MAX_DETAIL_PAGES_PER_SOURCE]
 
         for link in candidates:
-            description, published_at, last_date = (
-                extract_detail(link["url"])
+            (
+                description,
+                published_at,
+                last_date,
+                detail_title
+            ) = extract_detail(link["url"])
+
+            title = (
+                detail_title
+                if valid_title(detail_title)
+                else link["title"]
             )
 
-            title = link["title"]
+            if not valid_title(title):
+                continue
 
             if not description:
                 description = title
@@ -784,26 +820,13 @@ def scrape_html_source(source, source_type):
             update_type = classify_update(
                 title,
                 description,
+                source_type,
                 source_category
             )
 
-            if source_type == "board":
-                update_type = "board"
+            date_for_age = published_at or last_date
 
-            if source_type == "job":
-                if update_type not in ("job", "exam"):
-                    update_type = "job"
-
-            if source_type == "news":
-                update_type = "news"
-
-            date_for_age = (
-                published_at or last_date
-            )
-
-            if date_for_age and not is_recent(
-                date_for_age
-            ):
+            if date_for_age and not is_recent(date_for_age):
                 continue
 
             item = make_update(
@@ -822,8 +845,16 @@ def scrape_html_source(source, source_type):
 
             time.sleep(0.15)
 
+    logging.info(
+        "%s accepted updates: %s",
+        source_name,
+        len(updates)
+    )
+
     return updates
-    # =========================================================
+
+
+# =========================================================
 # RSS / ATOM HELPERS
 # =========================================================
 
@@ -850,11 +881,6 @@ def xml_child_text(element, names):
 
 
 def xml_entry_link(entry, feed_url):
-    """
-    RSS और Atom दोनों में सही article URL खोजने की कोशिश।
-    Atom में self लिंक को article लिंक नहीं मानता।
-    """
-
     for child in entry:
         if xml_local_name(child.tag) != "link":
             continue
@@ -881,10 +907,7 @@ def xml_entry_link(entry, feed_url):
             )
 
             if value.startswith("http"):
-                return normalize_url(
-                    value,
-                    feed_url
-                )
+                return normalize_url(value, feed_url)
 
     return ""
 
@@ -896,14 +919,10 @@ def parse_xml_date(text):
     text = clean_text(text)
 
     try:
-        from email.utils import parsedate_to_datetime
-
         value = parsedate_to_datetime(text)
 
         if value.tzinfo is None:
-            value = value.replace(
-                tzinfo=timezone.utc
-            )
+            value = value.replace(tzinfo=timezone.utc)
 
         return value.astimezone(timezone.utc)
 
@@ -916,17 +935,13 @@ def parse_xml_date(text):
         )
 
         if value.tzinfo is None:
-            value = value.replace(
-                tzinfo=timezone.utc
-            )
+            value = value.replace(tzinfo=timezone.utc)
 
         return value.astimezone(timezone.utc)
 
     except Exception:
         return parse_date(text)
-
-
-# =========================================================
+        # =========================================================
 # RSS / ATOM SCRAPER
 # =========================================================
 
@@ -936,13 +951,11 @@ def scrape_rss_source(source):
     feed_url = source["url"]
     source_name = source["name"]
     source_category = source.get(
-        "category", "Bihar News"
+        "category",
+        "Bihar News"
     )
 
-    logging.info(
-        "Checking RSS: %s",
-        feed_url
-    )
+    logging.info("Checking RSS: %s", feed_url)
 
     response = get_page(feed_url)
 
@@ -950,9 +963,7 @@ def scrape_rss_source(source):
         return updates
 
     try:
-        root = ET.fromstring(
-            response.content
-        )
+        root = ET.fromstring(response.content)
 
     except ET.ParseError as error:
         logging.warning(
@@ -960,58 +971,38 @@ def scrape_rss_source(source):
             feed_url,
             error
         )
-
         return updates
 
     entries = []
 
     for element in root.iter():
-        name = xml_local_name(element.tag)
-
-        if name in ("item", "entry"):
+        if xml_local_name(element.tag) in ("item", "entry"):
             entries.append(element)
 
     for entry in entries[:100]:
-        title = xml_child_text(
-            entry,
-            ["title"]
-        )
+        title = xml_child_text(entry, ["title"])
 
         description = xml_child_text(
             entry,
-            [
-                "description",
-                "summary",
-                "encoded",
-                "content",
-            ]
+            ["description", "summary", "encoded", "content"]
         )
 
-        url = xml_entry_link(
-            entry,
-            feed_url
-        )
+        url = xml_entry_link(entry, feed_url)
 
         date_text = xml_child_text(
             entry,
-            [
-                "pubdate",
-                "published",
-                "updated",
-                "date",
-            ]
+            ["pubdate", "published", "updated", "date"]
         )
 
-        published_at = parse_xml_date(
-            date_text
-        )
+        published_at = parse_xml_date(date_text)
 
         if not title or not url:
             continue
 
-        if published_at and not is_recent(
-            published_at
-        ):
+        if not valid_title(title):
+            continue
+
+        if published_at and not is_recent(published_at):
             continue
 
         if not description:
@@ -1058,7 +1049,6 @@ def collect_all_updates():
                 source,
                 "board"
             )
-
             all_updates.extend(results)
 
         except Exception:
@@ -1074,7 +1064,6 @@ def collect_all_updates():
                 source,
                 "job"
             )
-
             all_updates.extend(results)
 
         except Exception:
@@ -1086,10 +1075,7 @@ def collect_all_updates():
     # News RSS updates
     for source in RSS_SOURCES:
         try:
-            results = scrape_rss_source(
-                source
-            )
-
+            results = scrape_rss_source(source)
             all_updates.extend(results)
 
         except Exception:
@@ -1098,9 +1084,7 @@ def collect_all_updates():
                 source.get("name")
             )
 
-    return remove_duplicates(
-        all_updates
-    )
+    return remove_duplicates(all_updates)
 
 
 # =========================================================
@@ -1115,28 +1099,26 @@ def remove_duplicates(items):
         if not item:
             continue
 
-        url = normalize_url(
-            item.get("url", "")
-        )
+        url = normalize_url(item.get("url", ""))
 
         if not url:
             continue
 
-        item_id = item.get("id") or make_id(
-            url,
-            item.get("title", "")
+        # Ignore URL fragments and trailing slash differences.
+        parsed = urlparse(url)
+        normalized_key = (
+            parsed.netloc.lower()
+            + parsed.path.rstrip("/").lower()
+            + ("?" + parsed.query if parsed.query else "")
         )
 
-        if item_id in unique:
+        if normalized_key in seen_urls:
             continue
 
-        if url in seen_urls:
-            continue
+        item["id"] = make_id(url)
 
-        item["id"] = item_id
-
-        unique[item_id] = item
-        seen_urls.add(url)
+        unique[item["id"]] = item
+        seen_urls.add(normalized_key)
 
     result = list(unique.values())
 
@@ -1161,29 +1143,19 @@ def group_updates(items):
     }
 
     for item in items:
-        update_type = item.get(
-            "type", "other"
-        )
+        update_type = item.get("type", "other")
 
         if update_type == "board":
-            grouped["board_updates"].append(
-                item
-            )
+            grouped["board_updates"].append(item)
 
         elif update_type == "job":
-            grouped["job_updates"].append(
-                item
-            )
+            grouped["job_updates"].append(item)
 
         elif update_type == "exam":
-            grouped["exam_updates"].append(
-                item
-            )
+            grouped["exam_updates"].append(item)
 
         elif update_type == "news":
-            grouped["news_updates"].append(
-                item
-            )
+            grouped["news_updates"].append(item)
 
     return grouped
 
@@ -1194,9 +1166,7 @@ def group_updates(items):
 
 def initialize_firebase():
     if firebase_admin is None:
-        logging.error(
-            "firebase-admin package is missing"
-        )
+        logging.error("firebase-admin package is missing")
         return None
 
     service_account_json = os.environ.get(
@@ -1219,17 +1189,12 @@ def initialize_firebase():
                 service_account_info
             )
 
-            firebase_admin.initialize_app(
-                credential
-            )
+            firebase_admin.initialize_app(credential)
 
         return firestore.client()
 
     except Exception:
-        logging.exception(
-            "Firebase initialization failed"
-        )
-
+        logging.exception("Firebase initialization failed")
         return None
 
 
@@ -1245,11 +1210,12 @@ def upload_to_firestore(db, grouped):
         return False
 
     total_uploaded = 0
+    all_successful = True
 
     for collection_name, items in grouped.items():
         if not items:
             logging.info(
-                "%s: no new updates",
+                "%s: no updates",
                 collection_name
             )
             continue
@@ -1261,13 +1227,8 @@ def upload_to_firestore(db, grouped):
         )
 
         try:
-            # Firestore batch limit is 500.
-            # 400 keeps a safety margin.
             for start in range(0, len(items), 400):
-                batch_items = items[
-                    start:start + 400
-                ]
-
+                batch_items = items[start:start + 400]
                 batch = db.batch()
 
                 for item in batch_items:
@@ -1277,8 +1238,6 @@ def upload_to_firestore(db, grouped):
                         collection_name
                     ).document(document_id)
 
-                    # Keep the first-seen date when
-                    # an existing document is updated.
                     old_doc = reference.get()
 
                     old_data = (
@@ -1293,15 +1252,8 @@ def upload_to_firestore(db, grouped):
                     )
 
                     data = dict(item)
-
-                    data["first_seen_at"] = (
-                        first_seen_at
-                    )
-
-                    data["last_checked_at"] = (
-                        iso_now()
-                    )
-
+                    data["first_seen_at"] = first_seen_at
+                    data["last_checked_at"] = iso_now()
                     data["active"] = True
 
                     batch.set(
@@ -1311,10 +1263,7 @@ def upload_to_firestore(db, grouped):
                     )
 
                 batch.commit()
-
-                total_uploaded += len(
-                    batch_items
-                )
+                total_uploaded += len(batch_items)
 
             logging.info(
                 "Uploaded successfully: %s",
@@ -1322,6 +1271,7 @@ def upload_to_firestore(db, grouped):
             )
 
         except Exception:
+            all_successful = False
             logging.exception(
                 "Firestore upload failed: %s",
                 collection_name
@@ -1332,7 +1282,7 @@ def upload_to_firestore(db, grouped):
         total_uploaded
     )
 
-    return True
+    return all_successful
 
 
 # =========================================================
@@ -1365,18 +1315,11 @@ def save_json(items, grouped):
                 indent=2
             )
 
-        logging.info(
-            "JSON saved: %s",
-            OUTPUT_FILE
-        )
-
+        logging.info("JSON saved: %s", OUTPUT_FILE)
         return True
 
     except Exception:
-        logging.exception(
-            "Could not save updates.json"
-        )
-
+        logging.exception("Could not save updates.json")
         return False
 
 
@@ -1391,35 +1334,33 @@ def main():
     logging.info("BIHAR EDU ALERT AUTOMATIC UPDATES")
     logging.info("=" * 55)
 
-    # Step 1: Scrape all websites and RSS feeds.
+    # Step 1: Collect updates
     all_updates = collect_all_updates()
 
-    # Step 2: Group by collection.
-    grouped = group_updates(
-        all_updates
-    )
+    # Step 2: Group updates
+    grouped = group_updates(all_updates)
 
-    # Step 3: Save JSON artifact.
-    save_json(
+    # Step 3: Save JSON
+    json_saved = save_json(
         all_updates,
         grouped
     )
 
-    # Step 4: Connect Firebase.
+    # Step 4: Connect Firebase
     db = initialize_firebase()
 
-    # Step 5: Upload updates.
+    # Step 5: Upload to Firebase
+    firebase_success = False
+
     if db is not None:
-        upload_to_firestore(
+        firebase_success = upload_to_firestore(
             db,
             grouped
         )
     else:
-        logging.error(
-            "Firebase upload skipped."
-        )
+        logging.error("Firebase upload skipped.")
 
-    # Step 6: Print summary.
+    # Step 6: Summary
     elapsed = round(
         time.time() - start_time,
         2
@@ -1455,9 +1396,25 @@ def main():
     )
 
     logging.info(
+        "JSON saved: %s",
+        json_saved
+    )
+
+    logging.info(
+        "Firebase upload successful: %s",
+        firebase_success
+    )
+
+    logging.info(
         "Time taken: %s seconds",
         elapsed
     )
+
+    # Fail the GitHub Actions run if important output failed.
+    if not json_saved or not firebase_success:
+        raise RuntimeError(
+            "JSON generation or Firebase upload failed."
+        )
 
 
 # =========================================================
