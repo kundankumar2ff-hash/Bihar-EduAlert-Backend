@@ -1,75 +1,33 @@
+
 import os
 import re
 import json
 import hashlib
 import logging
-import time
-import html
-import unicodedata
-from datetime import datetime, timedelta, timezone
-from urllib.parse import urljoin, urlparse, urldefrag, unquote
-from email.utils import parsedate_to_datetime
 from io import BytesIO
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
-try:
-    import firebase_admin
-    from firebase_admin import credentials, firestore
-except ImportError:
-    firebase_admin = None
-    credentials = None
-    firestore = None
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 
-# =========================================================
-# CONFIGURATION
-# =========================================================
+# =====================================================
+# CONFIG
+# =====================================================
 
-APP_NAME = "Bihar EduAlert"
-OUTPUT_FILE = "updates.json"
+USER_AGENT = "Mozilla/5.0 BiharEduAlert-MCQ-Extractor/1.0"
+MAX_PDF_SIZE = 8 * 1024 * 1024
+MAX_PAGES = 80
+MAX_QUESTIONS_PER_PDF = 80
+TIMEOUT = 25
 
-HTML_TIMEOUT = 18
-PDF_TIMEOUT = 12
-RSS_TIMEOUT = 15
-MAX_AGE_DAYS = 90
-MAX_LINKS_PER_PAGE = 250
-MAX_PDF_SIZE = 5 * 1024 * 1024
-MAX_PDF_PAGES = 5
-MAX_RSS_ENTRIES = 60
-MAX_PDF_DOWNLOADS_PER_PAGE = 18
-SLEEP_BETWEEN_PAGES = 0.3
+HEADERS = {"User-Agent": USER_AGENT}
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/125.0 Safari/537.36"
-)
-
-HEADERS = {
-    "User-Agent": USER_AGENT,
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml,"
-        "application/rss+xml,application/pdf,*/*"
-    ),
-}
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-
-session = requests.Session()
-session.headers.update(HEADERS)
-
-
-# =========================================================
-# SOURCES
-# =========================================================
-
-BOARD_SOURCES = [
+SOURCES = [
     {
         "name": "Bihar Board",
         "category": "Bihar Board",
@@ -87,9 +45,6 @@ BOARD_SOURCES = [
             "https://cbseacademic.nic.in/",
         ],
     },
-]
-
-JOB_SOURCES = [
     {
         "name": "Bihar Police CSBC",
         "category": "Police",
@@ -103,24 +58,7 @@ JOB_SOURCES = [
     {
         "name": "BPSC",
         "category": "BPSC",
-        # BPSC and BPSSC are different commissions/websites.
         "urls": ["https://bpsc.bihar.gov.in/"],
-    },
-    {
-        "name": "BSSC",
-        "category": "BSSC",
-        "urls": ["https://bssc.bihar.gov.in/"],
-    },
-    {
-        "name": "BTSC",
-        "category": "BTSC",
-        "urls": ["https://btsc.bihar.gov.in/"],
-    },
-    {
-        "name": "Railway Recruitment Board",
-        "category": "Railway",
-        # rrbapply.gov.in is an application portal, not a notices page.
-        "urls": ["https://rrb.indianrailways.gov.in/"],
     },
     {
         "name": "SSC",
@@ -128,768 +66,432 @@ JOB_SOURCES = [
         "urls": ["https://ssc.gov.in/"],
     },
     {
+        "name": "Railway",
+        "category": "Railway",
+        "urls": ["https://rrb.indianrailways.gov.in/"],
+    },
+    {
         "name": "Indian Army",
         "category": "Army",
         "urls": ["https://joinindianarmy.nic.in/"],
     },
-    {
-        "name": "Indian Navy",
-        "category": "Navy",
-        "urls": ["https://www.joinindiannavy.gov.in/"],
-    },
-    {
-        "name": "Indian Air Force",
-        "category": "Air Force",
-        "urls": ["https://afcat.cdac.in/"],
-    },
-    {
-        "name": "India Post",
-        "category": "Central Government",
-        "urls": ["https://indiapost.gov.in/"],
-    },
 ]
 
-RSS_SOURCES = [
-    {
-        "name": "Amar Ujala Bihar",
-        "category": "Bihar News",
-        "url": "https://www.amarujala.com/rss/bihar.xml",
-    },
-    {
-        "name": "Prabhat Khabar",
-        "category": "Bihar News",
-        "url": "https://www.prabhatkhabar.com/feed",
-    },
-    {
-        "name": "Live Hindustan",
-        "category": "Bihar News",
-        "url": "https://www.livehindustan.com/rss/bihar.xml",
-    },
-]
+session = requests.Session()
+session.headers.update(HEADERS)
 
-
-# =========================================================
-# KEYWORDS
-# =========================================================
-
-JOB_WORDS = [
-    "recruitment", "vacancy", "vacancies", "online application",
-    "apply online", "application form", "appointment", "भर्ती",
-    "नियुक्ति", "रिक्ति", "आवेदन", "रोजगार", "नौकरी", "पदों पर",
-]
-
-ADMIT_WORDS = [
-    "admit card", "e-admit card", "hall ticket",
-    "प्रवेश पत्र", "एडमिट कार्ड",
-]
-
-RESULT_WORDS = [
-    "result", "merit list", "selection list", "final result",
-    "परिणाम", "रिजल्ट", "मेधा सूची", "चयन सूची",
-]
-
-EXAM_WORDS = [
-    "exam date", "examination", "exam schedule", "time table",
-    "date sheet", "answer key", "exam calendar", "परीक्षा",
-    "उत्तर कुंजी", "परीक्षा तिथि", "समय सारणी", "डेट शीट",
-]
-
-BOARD_WORDS = [
-    "bihar board", "bseb", "intermediate", "matric", "cbse",
-    "class 10", "class 12", "class x", "class xii", "syllabus",
-    "sample paper", "model paper", "पाठ्यक्रम", "मैट्रिक",
-    "इंटर", "मॉडल पेपर",
-]
-
-NOTICE_WORDS = [
-    "notice", "notification", "circular", "advertisement",
-    "corrigendum", "tender", "सूचना", "अधिसूचना", "विज्ञप्ति",
-]
-
-IGNORE_TITLE_WORDS = [
-    "home", "homepage", "contact us", "about us", "login",
-    "logout", "privacy policy", "disclaimer", "tender",
-    "facebook", "twitter", "instagram", "youtube",
-]
-
-DATE_TOKEN = (
-    r"(?:\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|"
-    r"\d{1,2}\s+(?:January|February|March|April|May|June|July|"
-    r"August|September|October|November|December)\s+\d{4}|"
-    r"(?:January|February|March|April|May|June|July|August|"
-    r"September|October|November|December)\s+\d{1,2},?\s+\d{4})"
-)
-
-LAST_DATE_LABELS = (
-    r"(?:last date|closing date|date of closure|last date for "
-    r"submission|closing of application|अंतिम तिथि|अंतिम तारीख|"
-    r"आवेदन की अंतिम तिथि)"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
 
-# =========================================================
-# TEXT AND DATE HELPERS
-# =========================================================
+# =====================================================
+# FIREBASE
+# =====================================================
 
-def clean_text(value):
-    if value is None:
-        return ""
-    value = html.unescape(str(value))
-    value = BeautifulSoup(value, "html.parser").get_text(" ", strip=True)
-    value = re.sub(r"\s+", " ", value).strip()
+def initialize_firebase():
+    raw = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
 
-    # Fix common UTF-8 text accidentally decoded as Windows-1252.
-    if any(token in value for token in ("â€“", "â€”", "â€™", "Ã", "Â")):
+    if not raw:
+        raise RuntimeError("FIREBASE_SERVICE_ACCOUNT secret missing")
+
+    info = json.loads(raw)
+
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(info)
+        firebase_admin.initialize_app(cred)
+
+    return firestore.client()
+
+
+# =====================================================
+# WEB / PDF
+# =====================================================
+
+def get_pdf_links(source):
+    found = set()
+
+    for page_url in source["urls"]:
         try:
-            repaired = value.encode("cp1252").decode("utf-8")
-            if repaired:
-                value = repaired
-        except (UnicodeEncodeError, UnicodeDecodeError):
-            pass
-    return value
+            response = session.get(page_url, timeout=TIMEOUT)
+            response.raise_for_status()
+
+            soup = BeautifulSoup(response.content, "lxml")
+
+            for tag in soup.find_all("a", href=True):
+                url = urljoin(response.url, tag["href"])
+                parsed = urlparse(url)
+
+                if (
+                    parsed.scheme in ("http", "https")
+                    and parsed.path.lower().endswith(".pdf")
+                ):
+                    found.add(url)
+
+        except Exception as exc:
+            logging.warning(
+                "Page failed: %s | %s", page_url, exc
+            )
+
+    return sorted(found)
 
 
-def parse_date(value):
-    if not value:
-        return None
-
-    value = clean_text(value)
-
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if dt.tzinfo:
-            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-        return dt
-    except (ValueError, TypeError):
-        pass
-
-    try:
-        dt = parsedate_to_datetime(value)
-        if dt.tzinfo:
-            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-        return dt
-    except (ValueError, TypeError, OverflowError):
-        pass
-
-    formats = [
-        "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y",
-        "%Y-%m-%d", "%d %B %Y", "%d %b %Y",
-        "%B %d, %Y", "%b %d, %Y",
-    ]
-    for fmt in formats:
-        try:
-            return datetime.strptime(value, fmt)
-        except ValueError:
-            continue
-    return None
-
-
-def extract_date_from_text(text):
-    if not text:
-        return None
-
-    match = re.search(DATE_TOKEN, text, re.IGNORECASE)
-    if match:
-        return parse_date(match.group(0))
-    return None
-
-
-def extract_last_date(text):
-    if not text:
-        return None
-
-    pattern = LAST_DATE_LABELS + r"\s*(?:is|:|-|को)?\s*(" + DATE_TOKEN + r")"
-    match = re.search(pattern, text, re.IGNORECASE)
-    if match:
-        return parse_date(match.group(1))
-    return None
-
-
-def is_recent(published_at):
-    if not published_at:
-        # Keep undated official notices, but label the date as unavailable.
-        return True
-
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    return published_at >= now - timedelta(days=MAX_AGE_DAYS)
-
-
-def contains_any(text, words):
-    text = (text or "").casefold()
-    return any(word.casefold() in text for word in words)
-
-
-# =========================================================
-# URL HELPERS
-# =========================================================
-
-def clean_url(url, base_url):
-    if not url:
-        return None
-    url = html.unescape(str(url)).strip()
-    if url.startswith(("javascript:", "mailto:", "tel:", "#")):
-        return None
-
-    try:
-        url = urljoin(base_url, url)
-        url, _ = urldefrag(url)
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            return None
-        return url
-    except Exception:
-        return None
-
-
-def make_id(url, title):
-    raw = (url or "") + "|" + (title or "")
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def normalize_title(title):
-    title = unicodedata.normalize("NFKC", clean_text(title)).casefold()
-    title = re.sub(r"[^\w\s]", " ", title)
-    return re.sub(r"\s+", " ", title).strip()
-
-
-def is_social_or_irrelevant_url(url):
-    host = urlparse(url).netloc.casefold()
-    ignored_hosts = (
-        "facebook.com", "twitter.com", "x.com", "instagram.com",
-        "youtube.com", "whatsapp.com", "linkedin.com",
-    )
-    return any(host == item or host.endswith("." + item) for item in ignored_hosts)
-
-
-def is_document_url(url):
-    path = urlparse(url).path.casefold()
-    return path.endswith((".pdf", ".doc", ".docx", ".xls", ".xlsx"))
-
-
-def looks_useful(title, url):
-    text = f"{title} {url}".casefold()
-    if contains_any(title, IGNORE_TITLE_WORDS):
-        return False
-
-    keywords = JOB_WORDS + ADMIT_WORDS + RESULT_WORDS + EXAM_WORDS
-    keywords += BOARD_WORDS + NOTICE_WORDS
-    return is_document_url(url) or contains_any(text, keywords)
-
-
-def title_from_filename(url):
-    name = unquote(urlparse(url).path.rsplit("/", 1)[-1])
-    name = re.sub(r"\.(pdf|docx?|xlsx?)$", "", name, flags=re.IGNORECASE)
-    name = re.sub(r"[_-]+", " ", name)
-    name = re.sub(r"\s+", " ", name).strip()
-    return name[:200]
-
-
-def useful_title(title):
-    title = clean_text(title)
-    if len(title) < 4:
-        return False
-    generic = {
-        "english", "hindi", "download", "click here", "view",
-        "read more", "more", "pdf",
-    }
-    return title.casefold() not in generic
-
-
-# =========================================================
-# CLASSIFICATION
-# =========================================================
-
-def classify_update(title, summary, source_category):
-    text = f"{title} {summary}".casefold()
-
-    if contains_any(text, ADMIT_WORDS):
-        return "Admit Card"
-    if contains_any(text, RESULT_WORDS):
-        return "Result"
-    if contains_any(text, EXAM_WORDS):
-        return "Exam Update"
-    if contains_any(text, JOB_WORDS):
-        return source_category
-    if contains_any(text, BOARD_WORDS):
-        if "cbse" in text:
-            return "CBSE Board"
-        if any(word in text for word in ("bihar", "bseb", "matric", "intermediate")):
-            return "Bihar Board"
-    return source_category
-
-
-# =========================================================
-# HTTP FETCH
-# =========================================================
-
-def fetch_url(url, timeout=HTML_TIMEOUT, stream=False):
+def download_pdf(url):
     try:
         response = session.get(
             url,
-            timeout=timeout,
-            allow_redirects=True,
-            stream=stream,
+            timeout=TIMEOUT,
+            stream=True,
         )
         response.raise_for_status()
-        return response
-    except requests.exceptions.SSLError as exc:
-        logging.error("SSL error: %s | %s", url, exc)
-    except requests.exceptions.Timeout:
-        logging.warning("Timeout: %s", url)
-    except requests.exceptions.RequestException as exc:
-        logging.warning("Request failed: %s | %s", url, exc)
-    except Exception as exc:
-        logging.warning("Unexpected fetch error: %s | %s", url, exc)
-    return None
 
-
-# =========================================================
-# PDF EXTRACTION
-# =========================================================
-
-def extract_pdf_text(url):
-    response = fetch_url(url, timeout=PDF_TIMEOUT, stream=True)
-    if not response:
-        return ""
-
-    try:
-        content_type = response.headers.get("Content-Type", "").casefold()
-        content_length = response.headers.get("Content-Length", "")
-        if content_length.isdigit() and int(content_length) > MAX_PDF_SIZE:
-            logging.info("PDF skipped (Content-Length too large): %s", url)
-            return ""
+        content_type = response.headers.get(
+            "Content-Type", ""
+        ).lower()
 
         buffer = BytesIO()
         total = 0
-        for chunk in response.iter_content(chunk_size=64 * 1024):
+
+        for chunk in response.iter_content(65536):
             if not chunk:
                 continue
+
             total += len(chunk)
+
             if total > MAX_PDF_SIZE:
-                logging.info("PDF skipped (over size limit): %s", url)
-                return ""
+                logging.info("PDF too large: %s", url)
+                return None
+
             buffer.write(chunk)
 
         data = buffer.getvalue()
-        if "pdf" not in content_type and not data.startswith(b"%PDF"):
-            return ""
 
+        if not data.startswith(b"%PDF") and "pdf" not in content_type:
+            return None
+
+        return data
+
+    except Exception as exc:
+        logging.warning("PDF download failed: %s | %s", url, exc)
+        return None
+
+
+def extract_pdf_text(data):
+    try:
         reader = PdfReader(BytesIO(data), strict=False)
         parts = []
-        for page in reader.pages[:MAX_PDF_PAGES]:
+
+        for page in reader.pages[:MAX_PAGES]:
             try:
                 parts.append(page.extract_text() or "")
             except Exception:
                 continue
 
-        return clean_text(" ".join(parts))[:5000]
+        return "\n".join(parts)
+
     except Exception as exc:
-        logging.warning("PDF extraction failed: %s | %s", url, exc)
+        logging.warning("PDF reading failed: %s", exc)
         return ""
-    finally:
-        response.close()
 
 
-# =========================================================
-# HTML METADATA
-# =========================================================
+# =====================================================
+# MCQ PARSER
+# =====================================================
 
-def extract_page_metadata(soup):
-    selectors = [
-        ("meta", {"property": "article:published_time"}),
-        ("meta", {"name": "date"}),
-        ("meta", {"name": "publish-date"}),
-        ("meta", {"name": "pubdate"}),
-        ("meta", {"itemprop": "datePublished"}),
-        ("meta", {"property": "og:updated_time"}),
+QUESTION_START = re.compile(
+    r"(?m)^\s*(?:Q(?:uestion)?\.?\s*)?(\d{1,3})\s*[\).:-]\s*(.+)$",
+    re.IGNORECASE,
+)
+
+OPTION_START = re.compile(
+    r"^\s*(?:\(([A-D])\)|([A-D])[\).:-])\s*(.+)$",
+    re.IGNORECASE,
+)
+
+ANSWER_PATTERNS = [
+    re.compile(
+        r"(?<!\w)(\d{1,3})\s*[\).:-]\s*\(?([A-D])\)?(?!\w)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?<!\w)(\d{1,3})\s+([A-D])(?!\w)",
+        re.IGNORECASE,
+    ),
+]
+
+OPTION_INDEX = {
+    "A": 0,
+    "B": 1,
+    "C": 2,
+    "D": 3,
+}
+
+
+def extract_answer_key(text):
+    """
+    Extract numbered answer keys such as:
+    1-A, 2-B, 3-C or 1. A, 2. B.
+
+    Only explicit answer-key sections are considered.
+    """
+    answer_map = {}
+
+    lines = text.splitlines()
+    answer_section = False
+
+    for line in lines:
+        low = line.casefold()
+
+        if re.search(
+            r"answer\s*key|correct\s*answer|उत्तर\s*माला|उत्तर\s*कुंजी",
+            low,
+        ):
+            answer_section = True
+
+        if not answer_section:
+            continue
+
+        for pattern in ANSWER_PATTERNS:
+            for match in pattern.finditer(line):
+                number = int(match.group(1))
+                letter = match.group(2).upper()
+
+                if 1 <= number <= 500:
+                    answer_map[number] = OPTION_INDEX[letter]
+
+    return answer_map
+
+
+def parse_questions(text):
+    """
+    Parse numbered questions and A/B/C/D options.
+    A question is retained only when all four options
+    and an explicit answer key are found.
+    """
+    lines = [
+        re.sub(r"\s+", " ", line).strip()
+        for line in text.splitlines()
+        if line.strip()
     ]
 
-    for tag_name, attrs in selectors:
-        tag = soup.find(tag_name, attrs=attrs)
-        if tag:
-            value = tag.get("content") or tag.get("datetime")
-            result = parse_date(value)
-            if result:
-                return result
+    answer_key = extract_answer_key(text)
 
-    tag = soup.find("time")
-    if tag:
-        return parse_date(tag.get("datetime") or tag.get_text(" ", strip=True))
-    return None
+    questions = []
+    current = None
 
+    def finish_question():
+        nonlocal current
 
-def extract_pdf_title(pdf_text, fallback):
-    if not pdf_text:
-        return fallback
+        if not current:
+            return
 
-    for line in pdf_text.splitlines():
-        line = clean_text(line)
-        if 8 <= len(line) <= 180 and not re.fullmatch(r"\d+", line):
-            if line.casefold() not in {"english", "hindi", "government of india"}:
-                return line
-    return fallback
+        if (
+            len(current["options"]) == 4
+            and current["number"] in answer_key
+        ):
+            correct = answer_key[current["number"]]
 
+            if 0 <= correct < 4:
+                question = current["question"].strip()
+                options = [
+                    item.strip()
+                    for item in current["options"]
+                ]
 
-# =========================================================
-# HTML SCRAPER
-# =========================================================
+                if question and all(options):
+                    questions.append({
+                        "number": current["number"],
+                        "question": question,
+                        "options": options,
+                        "correct_index": correct,
+                    })
 
-def scrape_html_source(source):
-    source_name = source["name"]
-    category = source["category"]
-    results = []
+        current = None
 
-    for page_url in source["urls"]:
-        logging.info("Checking %s: %s", source_name, page_url)
-        response = fetch_url(page_url, timeout=HTML_TIMEOUT)
-        if not response:
+    for line in lines:
+        question_match = QUESTION_START.match(line)
+
+        if question_match:
+            finish_question()
+
+            current = {
+                "number": int(question_match.group(1)),
+                "question": question_match.group(2).strip(),
+                "options": [],
+            }
             continue
 
-        try:
-            content_type = response.headers.get("Content-Type", "").casefold()
-            if "html" not in content_type and "text" not in content_type:
-                logging.warning("Not an HTML page: %s", page_url)
-                continue
+        if current:
+            option_match = OPTION_START.match(line)
 
-            soup = BeautifulSoup(response.content, "lxml")
-            page_date = extract_page_metadata(soup)
-            links = soup.find_all("a", href=True)
-            logging.info("%s links found on %s", len(links), page_url)
+            if option_match:
+                letter = (
+                    option_match.group(1)
+                    or option_match.group(2)
+                ).upper()
 
-            accepted = 0
-            pdf_downloads = 0
-            page_seen_urls = set()
+                index = OPTION_INDEX[letter]
 
-            for link in links[:MAX_LINKS_PER_PAGE]:
-                raw_url = link.get("href")
-                full_url = clean_url(raw_url, response.url)
-                if not full_url or full_url in page_seen_urls:
-                    continue
-                page_seen_urls.add(full_url)
+                while len(current["options"]) <= index:
+                    current["options"].append("")
 
-                if is_social_or_irrelevant_url(full_url):
-                    continue
-
-                title = clean_text(link.get_text(" ", strip=True))
-                if not title:
-                    title = title_from_filename(full_url)
-
-                if not useful_title(title) and not is_document_url(full_url):
-                    continue
-                if not looks_useful(title, full_url):
-                    continue
-
-                pdf_text = ""
-                if is_document_url(full_url):
-                    # Limit PDF downloads so one large notice page cannot take
-                    # several minutes on every scheduled run.
-                    if pdf_downloads >= MAX_PDF_DOWNLOADS_PER_PAGE:
-                        continue
-                    pdf_downloads += 1
-                    if urlparse(full_url).path.casefold().endswith(".pdf"):
-                        pdf_text = extract_pdf_text(full_url)
-
-                if title.casefold() in {"english", "hindi", "download", "pdf"}:
-                    title = extract_pdf_title(pdf_text, title_from_filename(full_url))
-
-                if not useful_title(title):
-                    title = title_from_filename(full_url)
-                if len(title) < 4:
-                    continue
-
-                summary = pdf_text[:1200]
-                combined_text = f"{title} {summary}"
-
-                published = (
-                    extract_date_from_text(title)
-                    or extract_date_from_text(pdf_text)
-                    or page_date
+                current["options"][index] = (
+                    option_match.group(3).strip()
                 )
-                last_date = extract_last_date(combined_text)
+            else:
+                # Continue a wrapped question or option line.
+                if current["options"]:
+                    last = current["options"][-1]
+                    if last:
+                        current["options"][-1] = (
+                            last + " " + line
+                        )
+                else:
+                    current["question"] += " " + line
 
-                if not is_recent(published):
-                    continue
+    finish_question()
 
-                final_category = classify_update(title, summary, category)
-
-                results.append({
-                    "id": make_id(full_url, title),
-                    "title": title[:300],
-                    "category": final_category,
-                    "source": source_name,
-                    "url": full_url,
-                    "published_at": published.isoformat() if published else "",
-                    "last_date": last_date.date().isoformat() if last_date else "",
-                    "summary": summary,
-                    "active": True,
-                })
-                accepted += 1
-
-            logging.info(
-                "%s accepted %s updates from %s (PDF checked: %s)",
-                source_name, accepted, page_url, pdf_downloads,
-            )
-        except Exception as exc:
-            logging.exception("Page scraping failed: %s | %s", page_url, exc)
-        finally:
-            response.close()
-
-        time.sleep(SLEEP_BETWEEN_PAGES)
-
-    return results
-
-
-# =========================================================
-# RSS SCRAPER
-# =========================================================
-
-def scrape_rss_source(source):
-    feed_url = source["url"]
-    source_name = source["name"]
-    category = source["category"]
-
-    logging.info("Checking RSS: %s", feed_url)
-    response = fetch_url(feed_url, timeout=RSS_TIMEOUT)
-    if not response:
-        return []
-
-    results = []
-    try:
-        soup = BeautifulSoup(response.content, "xml")
-        entries = soup.find_all(["item", "entry"])
-
-        for entry in entries[:MAX_RSS_ENTRIES]:
-            title_tag = entry.find("title")
-            title = clean_text(title_tag.get_text(" ", strip=True)) if title_tag else ""
-
-            link_tag = entry.find("link")
-            link = ""
-            if link_tag:
-                link = link_tag.get("href") or link_tag.get_text(strip=True)
-            link = clean_url(link, feed_url)
-
-            if not title or not link:
-                continue
-
-            description_tag = entry.find(["description", "summary", "content"])
-            summary = (
-                clean_text(description_tag.get_text(" ", strip=True))
-                if description_tag else ""
-            )
-
-            date_tag = entry.find(["pubDate", "published", "updated", "date"])
-            published = parse_date(date_tag.get_text(" ", strip=True)) if date_tag else None
-
-            if not is_recent(published):
-                continue
-
-            final_category = classify_update(title, summary, category)
-            last_date = extract_last_date(summary)
-
-            results.append({
-                "id": make_id(link, title),
-                "title": title[:300],
-                "category": final_category,
-                "source": source_name,
-                "url": link,
-                "published_at": published.isoformat() if published else "",
-                "last_date": last_date.date().isoformat() if last_date else "",
-                "summary": summary[:1200],
-                "active": True,
-            })
-    except Exception as exc:
-        logging.exception("RSS parsing failed: %s | %s", feed_url, exc)
-    finally:
-        response.close()
-
-    logging.info("%s RSS updates: %s", source_name, len(results))
-    return results
-
-
-# =========================================================
-# DEDUPLICATION
-# =========================================================
-
-def deduplicate_updates(updates):
-    unique_by_url = {}
-
-    for item in updates:
-        url = item.get("url", "").strip()
-        key = url.casefold() if url else item.get("id", "")
-        if not key:
-            key = make_id("", item.get("title", ""))
-
-        if key not in unique_by_url:
-            unique_by_url[key] = item
-            continue
-
-        old = unique_by_url[key]
-        old_score = sum(bool(old.get(field)) for field in (
-            "published_at", "last_date", "summary"
-        ))
-        new_score = sum(bool(item.get(field)) for field in (
-            "published_at", "last_date", "summary"
-        ))
-        if new_score > old_score:
-            unique_by_url[key] = item
-
-    # A second pass removes exact duplicate titles from the same source.
-    # Different URLs are retained if their titles differ or source differs.
-    final = []
+    # Remove duplicate questions within this PDF.
+    unique = []
     seen = set()
-    for item in unique_by_url.values():
-        key = (item.get("source", ""), normalize_title(item.get("title", "")))
-        if key in seen:
-            continue
-        seen.add(key)
-        final.append(item)
 
-    final.sort(
-        key=lambda item: item.get("published_at") or "",
-        reverse=True,
+    for question in questions:
+        key = re.sub(
+            r"\W+", "",
+            question["question"].casefold()
+        )
+
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(question)
+
+    return unique[:MAX_QUESTIONS_PER_PDF]
+
+
+# =====================================================
+# FIRESTORE UPLOAD
+# =====================================================
+
+def make_document_id(url):
+    return hashlib.sha256(
+        url.encode("utf-8")
+    ).hexdigest()
+
+
+def make_test_questions(questions):
+    output = []
+
+    for item in questions:
+        text = item["question"]
+        options = item["options"]
+
+        # Do not invent translations.
+        is_hindi = bool(
+            re.search(r"[\u0900-\u097F]", text)
+        )
+
+        output.append({
+            "question_hi": text if is_hindi else "",
+            "question_en": text if not is_hindi else "",
+            "options": options,
+            "correct_index": item["correct_index"],
+            "explanation_hi": "",
+            "explanation_en": "",
+        })
+
+    return output
+
+
+def upload_test(db, source, pdf_url, questions):
+    if not questions:
+        return False
+
+    doc_id = make_document_id(pdf_url)
+
+    data = {
+        "title": source["name"] + " PDF Practice Test",
+        "board": "Career",
+        "subject": source["category"],
+        "category": source["category"],
+        "source": source["name"],
+        "pdf_url": pdf_url,
+        "questions": make_test_questions(questions),
+        "question_count": len(questions),
+        "active": True,
+        "type": "pdf_extracted",
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+
+    ref = db.collection("mock_tests").document(doc_id)
+
+    # A repeated scheduled run updates the same PDF document,
+    # rather than creating another document.
+    ref.set(data, merge=True)
+
+    logging.info(
+        "Uploaded %s questions: %s",
+        len(questions), pdf_url
     )
-    return final
+
+    return True
 
 
-# =========================================================
-# FIREBASE
-# =========================================================
-
-def initialize_firebase():
-    if firebase_admin is None:
-        logging.error("firebase-admin library is not installed.")
-        return None
-
-    service_account_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
-    if not service_account_json:
-        logging.error("FIREBASE_SERVICE_ACCOUNT secret is missing.")
-        return None
-
-    try:
-        service_account_info = json.loads(service_account_json)
-        if not firebase_admin._apps:
-            cred = credentials.Certificate(service_account_info)
-            firebase_admin.initialize_app(cred)
-        return firestore.client()
-    except Exception as exc:
-        logging.exception("Firebase initialization failed: %s", exc)
-        return None
-
-
-def get_collection(category):
-    category = (category or "").casefold()
-
-    if "news" in category:
-        return "news_updates"
-    if "board" in category:
-        return "board_updates"
-    if category in ("admit card", "result", "exam update"):
-        return "exam_updates"
-    return "job_updates"
-
-
-def upload_to_firestore(updates):
-    db = initialize_firebase()
-    if db is None:
-        logging.error("Firebase upload skipped.")
-        return False
-
-    try:
-        uploaded = 0
-        batch = db.batch()
-        batch_count = 0
-
-        for item in updates:
-            collection_name = get_collection(item.get("category"))
-            doc_ref = db.collection(collection_name).document(item["id"])
-
-            data = dict(item)
-            data["updated_at"] = firestore.SERVER_TIMESTAMP
-            data["active"] = True
-            batch.set(doc_ref, data, merge=True)
-            batch_count += 1
-
-            if batch_count >= 400:
-                batch.commit()
-                uploaded += batch_count
-                logging.info("Firebase batch uploaded: %s", batch_count)
-                batch = db.batch()
-                batch_count = 0
-
-        if batch_count:
-            batch.commit()
-            uploaded += batch_count
-
-        logging.info("Firebase upload successful: %s records", uploaded)
-        return True
-    except Exception as exc:
-        logging.exception("Firebase upload failed: %s", exc)
-        return False
-
-
-# =========================================================
-# JSON OUTPUT
-# =========================================================
-
-def save_json(updates):
-    try:
-        output = {
-            "app": APP_NAME,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "total_updates": len(updates),
-            "updates": updates,
-        }
-        with open(OUTPUT_FILE, "w", encoding="utf-8") as file:
-            json.dump(output, file, ensure_ascii=False, indent=2)
-
-        logging.info("JSON saved: %s (%s updates)", OUTPUT_FILE, len(updates))
-        return True
-    except Exception as exc:
-        logging.exception("JSON save failed: %s", exc)
-        return False
-
-
-# =========================================================
+# =====================================================
 # MAIN
-# =========================================================
+# =====================================================
 
 def main():
-    logging.info("=" * 60)
-    logging.info("%s update checker started", APP_NAME)
-    logging.info("=" * 60)
+    logging.info("Bihar EduAlert Free MCQ Extractor started")
 
-    all_updates = []
+    db = initialize_firebase()
 
-    for source in BOARD_SOURCES:
-        try:
-            all_updates.extend(scrape_html_source(source))
-        except Exception as exc:
-            logging.exception("Board source error: %s | %s", source["name"], exc)
+    total_pdfs = 0
+    total_questions = 0
 
-    for source in JOB_SOURCES:
-        try:
-            all_updates.extend(scrape_html_source(source))
-        except Exception as exc:
-            logging.exception("Job source error: %s | %s", source["name"], exc)
+    for source in SOURCES:
+        logging.info("Checking source: %s", source["name"])
 
-    for source in RSS_SOURCES:
-        try:
-            all_updates.extend(scrape_rss_source(source))
-        except Exception as exc:
-            logging.exception("RSS source error: %s | %s", source["name"], exc)
+        pdf_links = get_pdf_links(source)
 
-    all_updates = deduplicate_updates(all_updates)
-    logging.info("Total unique updates: %s", len(all_updates))
+        logging.info(
+            "%s PDF links found: %s",
+            source["name"], len(pdf_links)
+        )
 
-    if not save_json(all_updates):
-        raise RuntimeError("Could not save updates.json")
+        for pdf_url in pdf_links:
+            data = download_pdf(pdf_url)
 
-    if not upload_to_firestore(all_updates):
-        raise RuntimeError("Firebase upload failed")
+            if not data:
+                continue
 
-    logging.info("=" * 60)
-    logging.info("Bihar EduAlert update checker completed.")
-    logging.info("=" * 60)
+            text = extract_pdf_text(data)
+
+            if not text.strip():
+                logging.info("No selectable text: %s", pdf_url)
+                continue
+
+            questions = parse_questions(text)
+
+            if not questions:
+                logging.info("No verified MCQs: %s", pdf_url)
+                continue
+
+            try:
+                if upload_test(db, source, pdf_url, questions):
+                    total_pdfs += 1
+                    total_questions += len(questions)
+
+            except Exception as exc:
+                logging.exception(
+                    "Upload failed: %s | %s",
+                    pdf_url, exc
+                )
+
+    logging.info(
+        "Completed. PDFs uploaded: %s | Questions: %s",
+        total_pdfs, total_questions
+    )
 
 
 if __name__ == "__main__":
